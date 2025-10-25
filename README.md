@@ -10,13 +10,13 @@ The expected outcome is user-friendly and easy to install Python toolbox that ma
 gantt
     title Practical Project: EEG Electrode Registration Toolbox
     dateFormat YYYY-MM-DD
-    Familiarize with the topic: 2025-10-15,2025-10-22
+    Familiarize with the topic:2025-10-15,2025-10-22
     Set up project environment(VSCode,UV,Github):2025-10-22,2025-10-29
-    Review existing scripts and choose functions:2025-10-29,2025-11-05
-    Data collection and working on the script:2025-11-05,2025-12-31
-    try to add different eeg cap types:2026-01-05,2026-01-21
-    Code testing, debugging, and documentation: 2026-01-21,2026-01-28
-    Prepare the final report meantime:2026-01-07,2026-01-28
+    Review scripts and plan:2025-10-29,2025-11-05
+    Data collection & coding:2025-11-05,2025-12-31
+    Add eeg cap types:2026-01-05,2026-01-21
+    Testing & documentation: 2026-01-21,2026-01-28
+    Preparing final report:2026-01-07,2026-01-28
     Preparing the poster:2026-01-28,2026-02-27
 
 ```
