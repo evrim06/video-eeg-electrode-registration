@@ -1,0 +1,13 @@
+[project]
+name = "video-eeg-electrode-registration"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "huggingface-hub>=1.0.1",
+    "ipykernel>=7.1.0",
+    "matplotlib>=3.10.7",
+    "opencv-python>=4.12.0.88",
+    "sam2>=1.1.0",
+]
