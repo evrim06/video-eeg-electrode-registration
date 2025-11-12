@@ -209,5 +209,5 @@ __marimo__/
 
 uv.lock
 .vscode
-sam2_hiera_large.pt^
+sam2_hiera_large.pt
 *.yaml
