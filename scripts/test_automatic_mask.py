@@ -7,12 +7,12 @@ import numpy as np
 mask_generator  = SAM2AutomaticMaskGenerator.from_pretrained(
     "facebook/sam2-hiera-large",
     device="cpu",
-    points_per_side=80,
+    points_per_side=96,
     crop_n_layers=1,
     crop_overlap_ratio=512/1500,
     pred_iou_thresh=0.6,
     stability_score_thresh=0.85,
-    min_mask_region_area=5,
+    min_mask_region_area=10,
     box_nms_thresh=0.9,
     output_mode="binary_mask"
 )
