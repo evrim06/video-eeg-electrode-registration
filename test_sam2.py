@@ -1,26 +1,30 @@
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Force SAM2 to load on CPU
-predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large", device="cpu")
+mask_generator  = SAM2AutomaticMaskGenerator.from_pretrained("facebook/sam2-hiera-large", device="cpu")
 
 # Read an image
-image = cv2.imread("example_cap.png")
+image = cv2.imread("data/example_cap.png")
 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-predictor.set_image(image_rgb)
+
+masks = mask_generator.generate(image_rgb)
 
 # Choose a prompt point (x, y)
 input_point = [[400, 400]]   # pick a point roughly near your object
 input_label = [1]
+
+input_boxes = [[200,200,600,600]]
 
 #Run segmentation
 masks, scores, logits = predictor.predict( point_coords=input_point,
     point_labels=input_label,
     multimask_output=True
 )
-
+#Helper functions for visualization
 def show_mask(mask, ax, random_color=False, borders = True):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
@@ -67,7 +71,7 @@ def show_masks(image, masks, scores, point_coords=None, box_coords=None, input_l
 plt.figure(figsize=(10, 10))
 plt.imshow(image)
 for mask in masks:
-    show_mask(mask.squeeze(0), plt.gca(), random_color=True)
+    show_mask(mask.squueye(0), plt.gca(), random_color=True)
 for box in input_boxes:
     show_box(box, plt.gca())
 plt.axis('off')

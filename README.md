@@ -12,8 +12,8 @@ gantt
     dateFormat YYYY-MM-DD
     Familiarize with the topic:2025-10-15,2025-10-22
     Set up project environment(VSCode,UV,Github):2025-10-22,2025-10-29
-    Review scripts and plan:2025-10-29,2025-11-05
-    Data collection & coding:2025-11-05,2025-12-31
+    Review scripts and plan:2025-10-29,2025-11-09
+    Data collection & coding:2025-11-10,2025-12-31
     Add eeg cap types:2026-01-05,2026-01-21
     Testing & documentation: 2026-01-21,2026-01-28
     Preparing final report:2026-01-07,2026-01-28
