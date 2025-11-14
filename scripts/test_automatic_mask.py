@@ -7,12 +7,12 @@ import numpy as np
 mask_generator  = SAM2AutomaticMaskGenerator.from_pretrained(
     "facebook/sam2-hiera-large",
     device="cpu",
-    points_per_side=96,
+    points_per_side=48,
     crop_n_layers=1,
     crop_overlap_ratio=512/1500,
     pred_iou_thresh=0.6,
     stability_score_thresh=0.85,
-    min_mask_region_area=10,
+    min_mask_region_area=0,
     box_nms_thresh=0.9,
     output_mode="binary_mask"
 )
@@ -20,7 +20,7 @@ mask_generator  = SAM2AutomaticMaskGenerator.from_pretrained(
 
 
 # Read an image
-image = cv2.imread("data/example_cap.png")
+image = cv2.imread("data/24ch_cap_example.png")
 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 masks = mask_generator.generate(image_rgb)
@@ -57,3 +57,4 @@ plt.imshow(image)
 show_anns(masks)
 plt.axis('off')
 plt.show() 
+
