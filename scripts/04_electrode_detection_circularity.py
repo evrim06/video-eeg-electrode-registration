@@ -1,5 +1,3 @@
-
-
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 import cv2
 import matplotlib.pyplot as plt
@@ -80,8 +78,8 @@ def get_head_mask(all_masks):
 mask_generator = SAM2AutomaticMaskGenerator.from_pretrained(
     "facebook/sam2-hiera-large",
     device="cpu",
-    points_per_side=16,     # smaller = faster
-    crop_n_layers=0,        # fewer layers = faster
+    points_per_side=48,     # smaller = faster
+    crop_n_layers=1,        # fewer layers = faster
     pred_iou_thresh=0.6,
     stability_score_thresh=0.85,
     min_mask_region_area=0,
