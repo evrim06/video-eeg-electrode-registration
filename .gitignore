@@ -211,3 +211,9 @@ uv.lock
 .vscode
 sam2_hiera_large.pt
 *.yaml
+
+# Ignore SAM2 model weights
+*.pt
+*.pth
+*.yaml
+checkpoints/
