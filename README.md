@@ -20,3 +20,25 @@ gantt
     Preparing the poster:2026-01-28,2026-02-27
 
 ```
+
+## Pipeline Flowchart
+
+```mermaid
+flowchart TD
+    Start([Start]) --> LoadModel[Load SAM2 Predictor]
+    LoadModel --> LoadVideo[Load Video]
+    LoadVideo --> UserROI[User Selects ROI Box]
+    UserROI --> Loop{Process Frames}
+    
+    Loop -- Next Frame --> SAM2[SAM2 Segmentation<br/>Get Cap Mask]
+    SAM2 --> Preprocess[Preprocess: Grayscale, Blur, Equalize]
+    Preprocess --> Masking["Apply Cap Mask & ROI Crop"]
+    Masking --> Threshold[Brightness Thresholding]
+    Threshold --> Morphology[Morphological Opening]
+    Morphology --> Blobs[Connected Components]
+    Blobs --> Filter["Filter by Area & Circularity"]
+    Filter --> Visualize[Visualize Centroids]
+    Visualize --> Loop
+    
+    Loop -- Done --> End([End])
+```
