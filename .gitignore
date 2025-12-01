@@ -217,3 +217,5 @@ sam2_hiera_large.pt
 *.pth
 *.yaml
 checkpoints/
+
+temp_frames/
