@@ -223,3 +223,9 @@ temp_frames/
 *.mp4
 *.jpg
 results/
+
+*.mp4
+data/
+
+
+
