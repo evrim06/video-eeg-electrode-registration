@@ -25,20 +25,26 @@ gantt
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> LoadModel[Load SAM2 Predictor]
-    LoadModel --> LoadVideo[Load Video]
-    LoadVideo --> UserROI[User Selects ROI Box]
-    UserROI --> Loop{Process Frames}
+    Start([Start]) --> LoadModels[Load YOLO & SAM2 Models]
+    LoadModels --> LoadVideo[Load Video]
+    LoadVideo --> DrawHeadROI[User Draws Head ROI]
+    DrawHeadROI --> CropFrames[Crop & Save Frames]
+    CropFrames --> DrawCapROI[User Draws Cap ROI]
+    DrawCapROI --> LoadFrames[Load Cropped Frames]
+    LoadFrames --> ClickLandmarks[User Clicks NAS, LPA, RPA]
+    ClickLandmarks --> Interactive{Interactive Detection}
     
-    Loop -- Next Frame --> SAM2[SAM2 Segmentation<br/>Get Cap Mask]
-    SAM2 --> Preprocess[Preprocess: Grayscale, Blur, Equalize]
-    Preprocess --> Masking["Apply Cap Mask & ROI Crop"]
-    Masking --> Threshold[Brightness Thresholding]
-    Threshold --> Morphology[Morphological Opening]
-    Morphology --> Blobs[Connected Components]
-    Blobs --> Filter["Filter by Area & Circularity"]
-    Filter --> Visualize[Visualize Centroids]
-    Visualize --> Loop
+    Interactive -- Manual Clicks --> ManualElectrodes[User Clicks Electrodes]
+    Interactive -- YOLO Detect --> RunYOLO[Run YOLO on Frame]
+    RunYOLO --> RestrictYOLO[Filter YOLO Detections by Cap ROI]
+    RestrictYOLO --> SuppressDupes[Suppress Duplicates Globally]
+    SuppressDupes --> AssignIDs[Assign Electrode IDs]
+    ManualElectrodes --> AssignIDs
     
-    Loop -- Done --> End([End])
+    AssignIDs --> SaveDetections[Save Detection Results]
+    SaveDetections --> Tracking[SAM2 Tracking Across Frames]
+    Tracking --> Smoothing[Trajectory Smoothing]
+    Smoothing --> Ordering[Order Electrodes by Landmarks]
+    Ordering --> SaveResults[Save Tracking & Ordering Results]
+    SaveResults --> End([End])
 ```
