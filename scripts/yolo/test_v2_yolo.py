@@ -2,7 +2,7 @@ from ultralytics import YOLO
 
 # 1. Load your trained model
 # (Make sure this points to your latest best.pt)
-model = YOLO(r"C:\Users\zugo4834\Desktop\video-eeg-electrode-registration\runs\detect\train\weights\best_v2.pt")
+model = YOLO(r"C:\Users\zugo4834\Desktop\video-eeg-electrode-registration\runs\detect\train4\weights\best.pt")
 
 # 2. Define the path to your NEW video
 video_path = "data/IMG_2763.mp4"  # Update this path

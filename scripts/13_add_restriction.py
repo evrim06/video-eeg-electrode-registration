@@ -50,7 +50,8 @@ CONFIG = {
     "poly_order": 2             # Savitzky-Golay polynomial order
 }
 
-YOLO_WEIGHTS = "runs/detect/train/weights/best_v2.pt"  # trained YOLOv11 weights
+YOLO_WEIGHTS = "runs/detect/train4/weights/best.pt"  # trained YOLOv11s weights
+
 
 # Max number of electrodes on your cap
 MAX_ELECTRODES = 24  # we will allow IDs 3..(3+MAX_ELECTRODES-1)
@@ -78,10 +79,8 @@ def initialize_models(
         sam2_ckpt_path,
         device=device_used
     )
+    # Ensure SAM2 is in float32 mode to avoid potential dtype issues
 
-    # --- Try to keep the internal SAM model in a consistent dtype ---
-    # If your installed version exposes `sam_model`, this will affect
-    # the underlying SAM2Base network that is actually used.
     if hasattr(sam2_predictor, "sam_model"):
         sam = sam2_predictor.sam_model
         sam.to(torch.float32)
@@ -334,9 +333,9 @@ def main():
     def on_click(event, x, y, flags, param):
         nonlocal current_id
         if event == cv2.EVENT_LBUTTONDOWN:
-            if current_id >= 3 + MAX_ELECTRODES:
-                print("Maximum number of electrodes reached - clicks now ignored.")
-                return
+            #if current_id >= 3 + MAX_ELECTRODES:
+                #print("Maximum number of electrodes reached - clicks now ignored.")
+                #eturn
 
             # Map display coords back to cropped-image coords
             real_x = int(x / DISPLAY_SCALE)
@@ -399,9 +398,9 @@ def main():
                 print(">>> Please click NAS, LPA, RPA first!")
                 continue
 
-            if current_id >= 3 + MAX_ELECTRODES:
-                print(">>> Already reached max electrodes, YOLO detection skipped.")
-                continue
+            #if current_id >= 3 + MAX_ELECTRODES:
+                #print(">>> Already reached max electrodes, YOLO detection skipped.")
+                #continue
 
             print(f"Running YOLO on frame {current_idx}...")
             results = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
@@ -411,9 +410,9 @@ def main():
                 boxes = results[0].boxes.xyxy.cpu().numpy()
 
                 for box in boxes:
-                    if current_id >= 3 + MAX_ELECTRODES:
-                        print("Reached maximum electrode count; stopping YOLO detections.")
-                        break
+                    #if current_id >= 3 + MAX_ELECTRODES:
+                        #print("Reached maximum electrode count; stopping YOLO detections.")
+                        #break
 
                     cx = (box[0] + box[2]) / 2.0
                     cy = (box[1] + box[3]) / 2.0
