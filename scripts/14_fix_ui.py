@@ -12,6 +12,8 @@ from ultralytics import YOLO
 import sam2
 from sam2.build_sam import build_sam2_video_predictor
 from contextlib import nullcontext
+import time
+
 
 # 1. CONFIGURATION & GLOBALS
 
@@ -23,21 +25,21 @@ else:
 print(f"--- Using device: {DEVICE_STR} ---")
 
 # Paths (adjust VIDEO_PATH and YOLO_WEIGHTS as needed)
-VIDEO_PATH   = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\data\\IMG_2763.mp4"
-FRAME_DIR    = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\frames"
-RESULTS_DIR  = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\results"
+VIDEO_PATH   = "C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\data\\IMG_2763.mp4"
+FRAME_DIR    = "C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\frames"
+RESULTS_DIR  = "C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\results"
 RAW_FILE     = os.path.join(RESULTS_DIR, "tracking_raw.pkl")
 SMOOTH_FILE  = os.path.join(RESULTS_DIR, "tracking_smoothed.pkl")
 ORDER_FILE   = os.path.join(RESULTS_DIR, "electrode_order.json")
 
 # SAM2
 # Download checkpoint if not present
-SAM2_CHECKPOINT = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\checkpoints\\sam2_hiera_large.pt"
+SAM2_CHECKPOINT = "C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\checkpoints\\sam2_hiera_large.pt"
 SAM2_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
 
 # Create checkpoints dir and download if needed
 if not os.path.exists(SAM2_CHECKPOINT):
-    os.makedirs("C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\checkpoints", exist_ok=True)
+    os.makedirs("C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\checkpoints", exist_ok=True)
     print(f"Downloading SAM2 checkpoint to {SAM2_CHECKPOINT}...")
     import urllib.request
     urllib.request.urlretrieve(SAM2_CHECKPOINT_URL, SAM2_CHECKPOINT)
@@ -61,9 +63,7 @@ CONFIG = {
     "poly_order": 2             # Savitzky-Golay polynomial order
 }
 
-YOLO_WEIGHTS = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\runs\\detect\\train4\\weights\\best.pt"  # trained YOLOv11s weights
-
-YOLO_WEIGHTS = "runs/detect/train4/weights/best.pt"  # trained YOLOv11s weights
+YOLO_WEIGHTS = "C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\runs\\detect\\train4\\weights\\best.pt"  # trained YOLOv11s weights
 
 # Max number of electrodes on your cap
 MAX_ELECTRODES = 24  # we will allow IDs 3..(3+MAX_ELECTRODES-1)
@@ -108,28 +108,33 @@ def draw_hud(img, idx, total, current_id):
     msg1 = f"Frame: {idx}/{total-1}"
 
     # Progress indicators
+    # Logic: If current_id is 1, it means we just finished 0 (NAS), so NAS gets a check.
     status = []
-    status.append(f"NAS: {'✓' if current_id > 0 else '…'}")
-    status.append(f"LPA: {'✓' if current_id > 1 else '…'}")
-    status.append(f"RPA: {'✓' if current_id > 2 else '…'}")
+    status.append(f"NAS: {'[OK]' if current_id > 0 else '...'}")
+    status.append(f"LPA: {'[OK]' if current_id > 1 else '...'}")
+    status.append(f"RPA: {'[OK]' if current_id > 2 else '...'}")
 
     if current_id <= 2:
-        msg2 = " → ".join(status)
+        msg2 = " -> ".join(status)
+        color_status = (0, 255, 255) # Yellow for landmarks
     else:
+        # Landmarks done, show electrode count
         electrodes_done = current_id - 3
-        msg2 = f"Electrodes: {electrodes_done}/{MAX_ELECTRODES}"
+        msg2 = f"Landmarks: [DONE] | Electrodes: {electrodes_done}/{MAX_ELECTRODES}"
+        color_status = (0, 255, 0)   # Green for electrodes
+
+    # Draw background box for text to make it readable
+    cv2.rectangle(img, (0, 0), (600, 100), (0, 0, 0), -1)
 
     cv2.putText(img, msg1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                (255, 255, 0), 2)
+                (255, 255, 255), 2)
     cv2.putText(img, msg2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                (0, 255, 255), 2)
+                color_status, 2)
     cv2.putText(img,
                 "Controls: s=forward, a=back, d=detect, space=finish, q=quit",
                 (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (255, 255, 255), 1)
-
+                (200, 200, 200), 1)
     return img
-
 
 
 def extract_frames_with_crop():
@@ -338,16 +343,21 @@ def main():
     global_points = []  # all clicked or YOLO centers in cropped coordinates
     current_id = 0      # 0,1,2 = landmarks; 3+ = electrodes
     current_idx = 0     # frame index in frame_names
+    
+    # --- VISUAL SETTINGS ---
+    flash_points = []   # will store tuples: (x, y, color, timestamp_created)
+    FLASH_DURATION = 1.0  # 1 SECOND DURATION (Requested by user)
+
+    landmark_points = {}  # stores final coords for logic, but NOT for permanent drawing
 
     def on_click(event, x, y, flags, param):
         nonlocal current_id
         if event == cv2.EVENT_LBUTTONDOWN:
-            # Map display coords back to cropped-image coords
             real_x = int(x / DISPLAY_SCALE)
             real_y = int(y / DISPLAY_SCALE)
             real = (real_x, real_y)
 
-            # Landmarks + optional manual electrode clicks
+            # Add to SAM2
             sam2_predictor.add_new_points_or_box(
                 state,
                 frame_idx=current_idx,
@@ -355,8 +365,24 @@ def main():
                 points=[np.array(real, dtype=np.float32)],
                 labels=[1]
             )
+
+            # Save permanently
             global_points.append(real)
+
+            # Store landmark logic (but we won't draw them permanently anymore)
+            if current_id < 3:
+                landmark_points[current_id] = real
+                # Green color for landmarks
+                color = (0, 255, 0) 
+            else:
+                # Red color for manual electrode clicks
+                color = (0, 0, 255)
+
+            # Add to flash points so it appears for 1 second then vanishes
+            flash_points.append((real_x, real_y, color, time.time()))
+
             current_id += 1
+
 
     cv2.namedWindow("Pipeline")
     cv2.setMouseCallback("Pipeline", on_click)
@@ -364,6 +390,7 @@ def main():
     # 5. Interactive labeling loop
     print("\n--- Interactive Phase ---")
     print("Click NAS, then LPA, then RPA. Press 'd' to detect electrodes with YOLO.")
+
 
     while True:
         img_path = os.path.join(FRAME_DIR, frame_names[current_idx])
@@ -373,18 +400,21 @@ def main():
 
         disp, _ = resize_for_display(img, CONFIG["display_height"])
 
-        # draw existing points
-        for i, pt in enumerate(global_points):
-            color = (0, 255, 0) if i < 3 else (0, 0, 255)  # green=landmarks, red=electrodes
-            cv2.circle(disp,
-                       (int(pt[0]*DISPLAY_SCALE), int(pt[1]*DISPLAY_SCALE)),
-                       5, color, -1)
-            cv2.putText(disp, str(i),
-                        (int(pt[0]*DISPLAY_SCALE) + 5,
-                         int(pt[1]*DISPLAY_SCALE) - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+        # ---- Draw flash points (temporary markers) ----
+        now = time.time()
+        # Keep points only if they are younger than 1 second
+        flash_points[:] = [p for p in flash_points if now - p[3] < FLASH_DURATION]
 
+        for (fx, fy, col, t_created) in flash_points:
+            cv2.circle(
+                disp,
+                (int(fx * DISPLAY_SCALE), int(fy * DISPLAY_SCALE)),
+                7, col, -1
+            )
+
+        # Draw HUD (Text status)
         disp = draw_hud(disp, current_idx, len(frame_names), current_id)
+
         cv2.imshow("Pipeline", disp)
 
         key = cv2.waitKey(1) & 0xFF
@@ -434,6 +464,10 @@ def main():
                     global_points.append(candidate)
                     current_id += 1
                     found += 1
+                    
+                    # Add to flash points (Red color, lasts 1 second)
+                    flash_points.append((cx, cy, (0,0,255), time.time()))
+
 
             print(f"YOLO added {found} electrode(s).")
 
