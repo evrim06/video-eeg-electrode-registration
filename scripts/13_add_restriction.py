@@ -11,7 +11,7 @@ from scipy.signal import savgol_filter
 from ultralytics import YOLO
 import sam2
 from sam2.build_sam import build_sam2_video_predictor
-
+from contextlib import nullcontext
 
 # 1. CONFIGURATION & GLOBALS
 
@@ -63,6 +63,7 @@ CONFIG = {
 
 YOLO_WEIGHTS = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\runs\\detect\\train4\\weights\\best.pt"  # trained YOLOv11s weights
 
+YOLO_WEIGHTS = "runs/detect/train4/weights/best.pt"  # trained YOLOv11s weights
 
 # Max number of electrodes on your cap
 MAX_ELECTRODES = 24  # we will allow IDs 3..(3+MAX_ELECTRODES-1)
@@ -90,19 +91,6 @@ def initialize_models(
         sam2_ckpt_path,
         device=device_used
     )
-    # Ensure SAM2 is in float32 mode to avoid potential dtype issues
-
-    if hasattr(sam2_predictor, "sam_model"):
-        sam = sam2_predictor.sam_model
-        sam.to(torch.float32)
-        sam.float()
-        for m in sam.modules():
-            for p in m.parameters(recurse=False):
-                if p is not None:
-                    p.data = p.data.float()
-            for b in m.buffers(recurse=False):
-                if b is not None:
-                    b.data = b.data.float()
 
     return yolo, sam2_predictor
 
@@ -338,12 +326,8 @@ def main():
         print("No frames extracted, aborting.")
         return
 
-    # 3. Initialize SAM2 state (with memory-saving options)
-    state = sam2_predictor.init_state(
-        video_path=FRAME_DIR,
-        offload_video_to_cpu=True,  # Keep video frames on CPU to save GPU memory
-        offload_state_to_cpu=True   # Keep state on CPU when not in use
-    )
+    # 3. Initialize SAM2 state (use as-is, no dtype forcing)
+    state = sam2_predictor.init_state(video_path=FRAME_DIR)
 
     # 4. Prepare interactive GUI
     first_img = cv2.imread(os.path.join(FRAME_DIR, frame_names[0]))
@@ -356,10 +340,6 @@ def main():
     def on_click(event, x, y, flags, param):
         nonlocal current_id
         if event == cv2.EVENT_LBUTTONDOWN:
-            #if current_id >= 3 + MAX_ELECTRODES:
-                #print("Maximum number of electrodes reached - clicks now ignored.")
-                #eturn
-
             # Map display coords back to cropped-image coords
             real_x = int(x / DISPLAY_SCALE)
             real_y = int(y / DISPLAY_SCALE)
@@ -421,10 +401,6 @@ def main():
                 print(">>> Please click NAS, LPA, RPA first!")
                 continue
 
-            #if current_id >= 3 + MAX_ELECTRODES:
-                #print(">>> Already reached max electrodes, YOLO detection skipped.")
-                #continue
-
             print(f"Running YOLO on frame {current_idx}...")
             results = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
             found = 0
@@ -433,10 +409,6 @@ def main():
                 boxes = results[0].boxes.xyxy.cpu().numpy()
 
                 for box in boxes:
-                    #if current_id >= 3 + MAX_ELECTRODES:
-                        #print("Reached maximum electrode count; stopping YOLO detections.")
-                        #break
-
                     cx = (box[0] + box[2]) / 2.0
                     cy = (box[1] + box[3]) / 2.0
                     candidate = (cx, cy)
@@ -477,12 +449,19 @@ def main():
     print("\n--- SAM2 Tracking ---")
     tracking = {}
 
-    with torch.inference_mode():
+    # Autocast: only for CUDA, nothing for CPU
+    if DEVICE_STR == "cuda":
+        autocast_context = torch.autocast("cuda", dtype=torch.bfloat16)
+    else:
+        autocast_context = nullcontext()
+
+    with autocast_context, torch.inference_mode():
         for f_idx, ids, logits in tqdm(
             sam2_predictor.propagate_in_video(state),
             total=len(frame_names)
         ):
             frame_dict = {}
+
             for i, obj_id in enumerate(ids):
                 mask = (logits[i] > 0.0).cpu().numpy().squeeze()
                 ys, xs = np.where(mask)
@@ -490,9 +469,9 @@ def main():
                     cx = np.mean(xs) + crop_off_x
                     cy = np.mean(ys) + crop_off_y
                     frame_dict[int(obj_id)] = (float(cx), float(cy))
+
             tracking[int(f_idx)] = frame_dict
 
-            # periodic save
             if f_idx % 100 == 0:
                 with open(RAW_FILE, "wb") as f:
                     pickle.dump(tracking, f)
