@@ -23,15 +23,26 @@ else:
 print(f"--- Using device: {DEVICE_STR} ---")
 
 # Paths (adjust VIDEO_PATH and YOLO_WEIGHTS as needed)
-VIDEO_PATH   = "data/IMG_2763.mp4"
-FRAME_DIR    = "frames"
-RESULTS_DIR  = "results"
+VIDEO_PATH   = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\data\\IMG_2763.mp4"
+FRAME_DIR    = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\frames"
+RESULTS_DIR  = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\results"
 RAW_FILE     = os.path.join(RESULTS_DIR, "tracking_raw.pkl")
 SMOOTH_FILE  = os.path.join(RESULTS_DIR, "tracking_smoothed.pkl")
 ORDER_FILE   = os.path.join(RESULTS_DIR, "electrode_order.json")
 
 # SAM2
-SAM2_CHECKPOINT = "checkpoints/sam2_hiera_large.pt"
+# Download checkpoint if not present
+SAM2_CHECKPOINT = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\checkpoints\\sam2_hiera_large.pt"
+SAM2_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
+
+# Create checkpoints dir and download if needed
+if not os.path.exists(SAM2_CHECKPOINT):
+    os.makedirs("C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\checkpoints", exist_ok=True)
+    print(f"Downloading SAM2 checkpoint to {SAM2_CHECKPOINT}...")
+    import urllib.request
+    urllib.request.urlretrieve(SAM2_CHECKPOINT_URL, SAM2_CHECKPOINT)
+    print("Download complete.")
+
 # We will build the config path from the installed sam2 package dir
 SAM2_CONFIG_NAME = "sam2_hiera_l.yaml"
 
@@ -50,7 +61,7 @@ CONFIG = {
     "poly_order": 2             # Savitzky-Golay polynomial order
 }
 
-YOLO_WEIGHTS = "runs/detect/train4/weights/best.pt"  # trained YOLOv11s weights
+YOLO_WEIGHTS = "C:\\Users\\User\\Desktop\\oldenburg\\video-eeg-electrode-registration\\runs\\detect\\train4\\weights\\best.pt"  # trained YOLOv11s weights
 
 
 # Max number of electrodes on your cap
@@ -194,24 +205,32 @@ def extract_frames_with_crop():
         print("No cap ROI defined. YOLO will run on the full cropped frame.")
 
     # ---- 3) Extract frames from big crop ----
+    # Only extract every Nth frame to reduce memory usage
+    FRAME_SKIP = 5  # Extract every 5th frame (adjust as needed)
+    
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frames = []
     idx = 0
+    frame_count = 0
 
-    print("Extracting cropped frames...")
+    print(f"Extracting cropped frames (every {FRAME_SKIP}th frame)...")
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        crop = frame[sy:sy+sh, sx:sx+sw]
-        fname = f"{idx:05d}.jpg"
-        cv2.imwrite(os.path.join(FRAME_DIR, fname), crop)
-        frames.append(fname)
-        idx += 1
+        # Only save every Nth frame
+        if frame_count % FRAME_SKIP == 0:
+            crop = frame[sy:sy+sh, sx:sx+sw]
+            fname = f"{idx:05d}.jpg"
+            cv2.imwrite(os.path.join(FRAME_DIR, fname), crop)
+            frames.append(fname)
+            idx += 1
+        
+        frame_count += 1
 
     cap.release()
-    print(f"Extracted {len(frames)} cropped frames.")
+    print(f"Extracted {len(frames)} cropped frames (from {frame_count} total).")
     return frames, (offset_x, offset_y), cap_roi
 
 
@@ -319,8 +338,12 @@ def main():
         print("No frames extracted, aborting.")
         return
 
-    # 3. Initialize SAM2 state
-    state = sam2_predictor.init_state(video_path=FRAME_DIR)
+    # 3. Initialize SAM2 state (with memory-saving options)
+    state = sam2_predictor.init_state(
+        video_path=FRAME_DIR,
+        offload_video_to_cpu=True,  # Keep video frames on CPU to save GPU memory
+        offload_state_to_cpu=True   # Keep state on CPU when not in use
+    )
 
     # 4. Prepare interactive GUI
     first_img = cv2.imread(os.path.join(FRAME_DIR, frame_names[0]))

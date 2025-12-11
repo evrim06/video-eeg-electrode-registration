@@ -3,7 +3,7 @@ name = "video-eeg-electrode-registration"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=1.0.1",
     "ipykernel>=7.1.0",
@@ -11,4 +11,18 @@ dependencies = [
     "opencv-python>=4.12.0.88",
     "sam2>=1.1.0",
     "scipy>=1.16.3",
+    "ultralytics>=8.3.235",
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
 ]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cuda"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cuda" }
+torchvision = { index = "pytorch-cuda" }
