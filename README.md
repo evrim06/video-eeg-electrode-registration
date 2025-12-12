@@ -23,28 +23,54 @@ gantt
 
 ## Pipeline Flowchart
 
-```mermaid
 flowchart TD
-    Start([Start]) --> LoadModels[Load YOLO & SAM2 Models]
-    LoadModels --> LoadVideo[Load Video]
-    LoadVideo --> DrawHeadROI[User Draws Head ROI]
-    DrawHeadROI --> CropFrames[Crop & Save Frames]
-    CropFrames --> DrawCapROI[User Draws Cap ROI]
-    DrawCapROI --> LoadFrames[Load Cropped Frames]
-    LoadFrames --> ClickLandmarks[User Clicks NAS, LPA, RPA]
-    ClickLandmarks --> Interactive{Interactive Detection}
+    Start([Start]) --> Init[Initialize Models: YOLO & SAM2]
     
-    Interactive -- Manual Clicks --> ManualElectrodes[User Clicks Electrodes]
-    Interactive -- YOLO Detect --> RunYOLO[Run YOLO on Frame]
-    RunYOLO --> RestrictYOLO[Filter YOLO Detections by Cap ROI]
-    RestrictYOLO --> SuppressDupes[Suppress Duplicates Globally]
-    SuppressDupes --> AssignIDs[Assign Electrode IDs]
-    ManualElectrodes --> AssignIDs
+    subgraph Data_Prep [1. Data Preparation]
+    Init --> MultiFrameCrop[Interactive Multi-Frame Crop Selection]
+    MultiFrameCrop --> ExtractFrames[Extract & Save Cropped Frames]
+    end
+
+    subgraph Masking_Phase [2. Cap Mask Generation]
+    ExtractFrames --> LoadFirstFrame[Load First Cropped Frame]
+    LoadFirstFrame --> AutoMaskGen{Auto or Manual Mask?}
     
-    AssignIDs --> SaveDetections[Save Detection Results]
-    SaveDetections --> Tracking[SAM2 Tracking Across Frames]
-    Tracking --> Smoothing[Trajectory Smoothing]
-    Smoothing --> Ordering[Order Electrodes by Landmarks]
-    Ordering --> SaveResults[Save Tracking & Ordering Results]
-    SaveResults --> End([End])
-```
+    AutoMaskGen -- Auto --> SAM2_Auto[SAM2 AutoMaskGenerator + YOLO]
+    AutoMaskGen -- Manual --> Manual_Click[User Clicks Cap Center]
+    
+    SAM2_Auto --> ExpandMask[Expand Mask Dilation by 10%]
+    Manual_Click --> ExpandMask
+    
+    ExpandMask --> ConfirmMask{User Confirms?}
+    ConfirmMask -- No/Redo --> AutoMaskGen
+    ConfirmMask -- Yes --> Precompute[Pre-compute & Cache Cap Mask for ALL Frames]
+    end
+
+    subgraph Labeling_Phase [3. Interactive Labeling]
+    Precompute --> UserClickLandmarks[User Clicks Landmarks: NAS, LPA, RPA]
+    UserClickLandmarks --> InteractiveLoop{Interactive Loop}
+    
+    InteractiveLoop -- Manual Click --> CheckMask1{Inside Cap Mask?}
+    CheckMask1 -- Yes --> AddManual[Add Point to SAM2 State]
+    CheckMask1 -- No --> Ignore1[Ignore Click]
+    
+    InteractiveLoop -- Press 'd' --> RunYOLO[Run YOLO on Current Frame]
+    RunYOLO --> CheckMask2{Inside Cap Mask?}
+    CheckMask2 -- Yes --> CheckDupes{Global Duplicate?}
+    CheckDupes -- No --> AddYOLO[Add Point to SAM2 State]
+    CheckMask2 -- No --> Ignore2[Ignore Detection]
+    
+    AddManual --> UpdateDisp[Update HUD & Flash Points]
+    AddYOLO --> UpdateDisp
+    UpdateDisp --> InteractiveLoop
+    end
+
+    subgraph Processing_Phase [4. Tracking & Analysis]
+    InteractiveLoop -- Press Space --> Tracking[SAM2 Propagate Electrodes]
+    Tracking --> RawSave[Save Raw Tracking Data]
+    RawSave --> Smoothing[Savitzky-Golay Smoothing]
+    Smoothing --> Ordering[Head-Relative Electrode Ordering]
+    Ordering --> FinalSave[Save Smoothed Data & Order JSON]
+    end
+
+    FinalSave --> End([End])
