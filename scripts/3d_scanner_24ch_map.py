@@ -6,8 +6,8 @@ import numpy as np
 import mne
 
 #Load two .elc files
-rec_montage = mne.channels.read_custom_montage("recordings/24ch_motor_11-12-2025_10-10 AM.elc") #recording
-std_montage = mne.channels.read_custom_montage("recordings/24ch_motor.elc") #standard
+rec_montage = mne.channels.read_custom_montage("Scanner_recordings/24ch_motor_11-12-2025_10-10 AM.elc") #recording
+std_montage = mne.channels.read_custom_montage("Scanner_recordings/24ch_motor.elc") #standard
 
 
 #Recorded montage 2D
