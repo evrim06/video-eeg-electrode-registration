@@ -26,52 +26,60 @@ gantt
 ```mermaid
 flowchart TD
     Start([Start]) --> Init[Initialize Models: YOLO & SAM2]
-    
+
+    %% --------------------
     subgraph Data_Prep [1. Data Preparation]
-    Init --> MultiFrameCrop[Interactive Multi-Frame Crop Selection]
-    MultiFrameCrop --> ExtractFrames[Extract & Save Cropped Frames]
+        direction LR
+        Init --> MultiFrameCrop[Interactive Multi-Frame Crop Selection]
+        MultiFrameCrop --> ExtractFrames[Extract & Save Cropped Frames]
     end
 
+    %% --------------------
     subgraph Masking_Phase [2. Cap Mask Generation]
-    ExtractFrames --> LoadFirstFrame[Load First Cropped Frame]
-    LoadFirstFrame --> AutoMaskGen{Auto or Manual Mask?}
-    
-    AutoMaskGen -- Auto --> SAM2_Auto[SAM2 AutoMaskGenerator + YOLO]
-    AutoMaskGen -- Manual --> Manual_Click[User Clicks Cap Center]
-    
-    SAM2_Auto --> ExpandMask[Expand Mask Dilation by 10%]
-    Manual_Click --> ExpandMask
-    
-    ExpandMask --> ConfirmMask{User Confirms?}
-    ConfirmMask -- No/Redo --> AutoMaskGen
-    ConfirmMask -- Yes --> Precompute[Pre-compute & Cache Cap Mask for ALL Frames]
+        direction LR
+        ExtractFrames --> LoadFirstFrame[Load First Cropped Frame]
+        LoadFirstFrame --> AutoMaskGen{Auto or Manual Mask?}
+
+        AutoMaskGen -- Auto --> SAM2_Auto[SAM2 AutoMaskGenerator + YOLO]
+        AutoMaskGen -- Manual --> Manual_Click[User Clicks Cap Center]
+
+        SAM2_Auto --> ExpandMask[Expand Mask Dilation by 10%]
+        Manual_Click --> ExpandMask
+
+        ExpandMask --> ConfirmMask{User Confirms?}
+        ConfirmMask -- Redo --> AutoMaskGen
+        ConfirmMask -- Accept --> Precompute[Pre-compute & Cache Cap Mask for ALL Frames]
     end
 
+    %% --------------------
     subgraph Labeling_Phase [3. Interactive Labeling]
-    Precompute --> UserClickLandmarks[User Clicks Landmarks: NAS, LPA, RPA]
-    UserClickLandmarks --> InteractiveLoop{Interactive Loop}
-    
-    InteractiveLoop -- Manual Click --> CheckMask1{Inside Cap Mask?}
-    CheckMask1 -- Yes --> AddManual[Add Point to SAM2 State]
-    CheckMask1 -- No --> Ignore1[Ignore Click]
-    
-    InteractiveLoop -- Press 'd' --> RunYOLO[Run YOLO on Current Frame]
-    RunYOLO --> CheckMask2{Inside Cap Mask?}
-    CheckMask2 -- Yes --> CheckDupes{Global Duplicate?}
-    CheckDupes -- No --> AddYOLO[Add Point to SAM2 State]
-    CheckMask2 -- No --> Ignore2[Ignore Detection]
-    
-    AddManual --> UpdateDisp[Update HUD & Flash Points]
-    AddYOLO --> UpdateDisp
-    UpdateDisp --> InteractiveLoop
+        direction LR
+        Precompute --> UserClickLandmarks[User Clicks Landmarks<br/>NAS → LPA → RPA]
+        UserClickLandmarks --> InteractiveLoop{User Action}
+
+        InteractiveLoop -- Manual Click --> CheckMask1{Inside Cap Mask?}
+        CheckMask1 -- Yes --> AddManual[Add Point to SAM2 State]
+        CheckMask1 -- No --> Ignore1[Ignore Click]
+
+        InteractiveLoop -- Press 'd' --> RunYOLO[Run YOLO on Current Frame]
+        RunYOLO --> CheckMask2{Inside Cap Mask?}
+        CheckMask2 -- Yes --> CheckDupes{Global Duplicate?}
+        CheckDupes -- No --> AddYOLO[Add Point to SAM2 State]
+        CheckMask2 -- No --> Ignore2[Ignore Detection]
+
+        AddManual --> UpdateDisp[Update HUD & Flash Points]
+        AddYOLO --> UpdateDisp
+        UpdateDisp --> InteractiveLoop
     end
 
+    %% --------------------
     subgraph Processing_Phase [4. Tracking & Analysis]
-    InteractiveLoop -- Press Space --> Tracking[SAM2 Propagate Electrodes]
-    Tracking --> RawSave[Save Raw Tracking Data]
-    RawSave --> Smoothing[Savitzky-Golay Smoothing]
-    Smoothing --> Ordering[Head-Relative Electrode Ordering]
-    Ordering --> FinalSave[Save Smoothed Data & Order JSON]
+        direction LR
+        InteractiveLoop -- Press Space --> Tracking[SAM2 Propagate Electrodes]
+        Tracking --> RawSave[Save Raw Tracking Data]
+        RawSave --> Smoothing[Savitzky-Golay Smoothing]
+        Smoothing --> Ordering[Head-Relative Electrode Ordering]
+        Ordering --> FinalSave[Save Smoothed Data & Order JSON]
     end
 
     FinalSave --> End([End])
