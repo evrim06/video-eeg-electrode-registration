@@ -23,6 +23,7 @@ gantt
 
 ## Pipeline Flowchart
 
+```mermaid
 flowchart TD
     Start([Start]) --> Init[Initialize Models: YOLO & SAM2]
     
@@ -74,3 +75,4 @@ flowchart TD
     end
 
     FinalSave --> End([End])
+```

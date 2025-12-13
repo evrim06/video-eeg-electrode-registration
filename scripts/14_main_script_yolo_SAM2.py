@@ -19,8 +19,6 @@ from contextlib import nullcontext
 
 # 1. CONFIGURATION & GLOBALS
 
-# 1. CONFIGURATION & GLOBALS
-
 # Device: CUDA if available, else CPU
 if torch.cuda.is_available():
     DEVICE_STR = "cuda"
@@ -62,7 +60,6 @@ SAM2_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/
 if not os.path.exists(SAM2_CHECKPOINT):
     print(f"Downloading SAM2 checkpoint to {SAM2_CHECKPOINT}...")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    import urllib.request
     urllib.request.urlretrieve(SAM2_CHECKPOINT_URL, SAM2_CHECKPOINT)
 else:
     print(f"SAM2 Checkpoint found at: {SAM2_CHECKPOINT}")
@@ -73,10 +70,9 @@ SAM2_CONFIG_NAME = "sam2_hiera_l.yaml"
 # 1. Try system install path first
 SAM2_CONFIG = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2", SAM2_CONFIG_NAME)
 
-# 2. If not found, check the 'configs' folder in your project root (visible in your screenshot)
+# 2. If not found, check the 'configs' folder in your project root
 if not os.path.exists(SAM2_CONFIG):
     PROJECT_CONFIG = os.path.join(BASE_DIR, "configs", "sam2", SAM2_CONFIG_NAME)
-    # Also check just inside 'configs' without the 'sam2' subfolder, just in case
     PROJECT_CONFIG_SIMPLE = os.path.join(BASE_DIR, "configs", SAM2_CONFIG_NAME)
     
     if os.path.exists(PROJECT_CONFIG):
@@ -85,7 +81,6 @@ if not os.path.exists(SAM2_CONFIG):
         SAM2_CONFIG = PROJECT_CONFIG_SIMPLE
     else:
         print(f"Warning: Config not found at {SAM2_CONFIG} or in project configs.")
-        # Fallback to current directory as a last resort
         SAM2_CONFIG = os.path.join(SCRIPT_DIR, SAM2_CONFIG_NAME)
 
 print(f"Using SAM2 Config: {SAM2_CONFIG}")
@@ -102,6 +97,7 @@ CONFIG = {
     "cap_confirm_alpha": 0.45,    
     "cap_autodetect_use_yolo": True, 
 }
+
 # 2. HELPER FUNCTIONS
 
 def initialize_models(yolo_weights_path=YOLO_WEIGHTS, sam2_cfg_path=SAM2_CONFIG, sam2_ckpt_path=SAM2_CHECKPOINT, device_used=DEVICE_STR):
@@ -405,13 +401,20 @@ def create_cap_mask_all_features(first_img, sam2_predictor, state, frame_idx, sa
         disp, _ = resize_for_display(first_img, CONFIG["display_height"])
         preview = _draw_mask_overlay(disp, cap_mask_exp, alpha=CONFIG["cap_confirm_alpha"])
         
-        instructions = f"CAP MASK (mode={mode}) | y=accept | r=redo | m=manual | a=auto | q=quit. Tip: For better cap detection press m and click center of cap."
+        # --- Updated Instructions ---
+        instructions = f"CAP MASK (mode={mode}) | y=accept | r=redo | m=manual | a=auto | q=quit"
+        tip = "Tip: For better detection, press 'm' and click the center of the cap."
+
         win = "Confirm Cap Mask"
         cv2.namedWindow(win)
         while True:
             show = preview.copy()
-            cv2.rectangle(show, (0, 0), (show.shape[1], 40), (0, 0, 0), -1)
+            # Box height increased to 60 to fit 2 lines
+            cv2.rectangle(show, (0, 0), (show.shape[1], 60), (0, 0, 0), -1)
             cv2.putText(show, instructions, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            # Tip displayed on second line
+            cv2.putText(show, tip, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1)
+            
             cv2.imshow(win, show)
             k = cv2.waitKey(1) & 0xFF
             if k == ord('y'):
