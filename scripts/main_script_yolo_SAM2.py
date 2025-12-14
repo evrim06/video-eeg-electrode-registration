@@ -22,14 +22,15 @@ from contextlib import nullcontext
 # ==================================================================================================
 
 # --- Device & Precision Selection ---
-# Automatically detect hardware and set the optimal precision
+# Automatically detect hardware to choose the fastest possible execution mode.
 if torch.cuda.is_available():
     DEVICE_STR = "cuda"
-    # Check if this specific GPU supports BFloat16 (e.g., Ampere A100/3090/4090 or newer)
+    # Check if this GPU supports BFloat16 (e.g., NVIDIA Ampere/30-series or newer).
+    # BFloat16 is crucial for preventing dtype mismatch errors in SAM2 on CUDA.
     if torch.cuda.is_bf16_supported():
         USE_BFLOAT16 = True
         print("--- Using device: CUDA (BFloat16 Supported) ---")
-        # Enable TF32 for faster math on supported cards
+        # Enable TF32 for faster matrix math on supported GPUs
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     else:
@@ -41,29 +42,34 @@ else:
     print("--- Using device: CPU (Float32 Mode) ---")
 
 # --- Dynamic Path Management ---
+# Automatically find the script's folder so it runs on any computer without editing paths.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.dirname(SCRIPT_DIR)
+BASE_DIR = os.path.dirname(SCRIPT_DIR)  # Assume project root is one level up
 
 print(f"Project Root detected at: {BASE_DIR}")
 
-# Define all file paths
+# Define file paths relative to the project root
 VIDEO_PATH      = os.path.join(BASE_DIR, "data", "IMG_2763.mp4")
 FRAME_DIR       = os.path.join(BASE_DIR, "frames")
 RESULTS_DIR     = os.path.join(BASE_DIR, "results")
 CHECKPOINT_DIR  = os.path.join(BASE_DIR, "checkpoints")
 
+# Output files
 RAW_FILE        = os.path.join(RESULTS_DIR, "tracking_raw.pkl")
 SMOOTH_FILE     = os.path.join(RESULTS_DIR, "tracking_smoothed.pkl")
 ORDER_FILE      = os.path.join(RESULTS_DIR, "electrode_order.json")
 CROP_INFO_FILE  = os.path.join(RESULTS_DIR, "crop_info.json")
 
 # --- YOLO Configuration ---
+# Path to your custom trained YOLOv11s weights for electrode detection
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "runs", "detect", "train4", "weights", "best.pt")
 
 # --- SAM2 Model Configuration ---
+# Use the 'Small' model for speed (~10x faster than Large).
 SAM2_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "sam2_hiera_small.pt")
 SAM2_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt"
 
+# Download SAM2 weights automatically if missing
 if not os.path.exists(SAM2_CHECKPOINT):
     print(f"Downloading SAM2 checkpoint to {SAM2_CHECKPOINT}...")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -72,9 +78,11 @@ else:
     print(f"SAM2 Checkpoint found at: {SAM2_CHECKPOINT}")
 
 # --- SAM2 Config File Logic ---
+# The config file must match the model size (e.g., 'sam2_hiera_s.yaml' for small)
 SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 SAM2_CONFIG = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2", SAM2_CONFIG_NAME)
 
+# Fallback: Look for config in project folder if not found in python package
 if not os.path.exists(SAM2_CONFIG):
     PROJECT_CONFIG = os.path.join(BASE_DIR, "configs", "sam2", SAM2_CONFIG_NAME)
     PROJECT_CONFIG_SIMPLE = os.path.join(BASE_DIR, "configs", SAM2_CONFIG_NAME)
@@ -91,16 +99,16 @@ print(f"Using SAM2 Config: {SAM2_CONFIG}")
 
 # --- General Pipeline Settings ---
 CONFIG = {
-    "display_height": 800,      
-    "duplicate_radius": 50,     
-    "yolo_conf": 0.25,          
-    "smooth_window": 7,         
-    "poly_order": 2,            
-    "cap_mask_expansion": 1.10,   
-    "cap_min_area_frac": 0.03,    
-    "cap_max_area_frac": 0.70,    
-    "cap_confirm_alpha": 0.45,    
-    "cap_autodetect_use_yolo": True, 
+    "display_height": 800,      # Height of GUI window
+    "duplicate_radius": 50,     # Pixels: Ignore new points if they are this close to existing ones
+    "yolo_conf": 0.25,          # Confidence threshold for YOLO
+    "smooth_window": 7,         # Window size for Savitzky-Golay smoothing
+    "poly_order": 2,            # Polynomial order for smoothing
+    "cap_mask_expansion": 1.10,   # Expand auto-detected cap mask by 10% (safety margin)
+    "cap_min_area_frac": 0.03,    # Reject auto-masks smaller than 3% of image
+    "cap_max_area_frac": 0.70,    # Reject auto-masks larger than 70% of image
+    "cap_confirm_alpha": 0.45,    # Opacity for the mask visualization overlay
+    "cap_autodetect_use_yolo": True, # Use YOLO detections to verify auto-masks
 }
 
 # ==================================================================================================
@@ -109,8 +117,8 @@ CONFIG = {
 
 def initialize_models(yolo_weights_path=YOLO_WEIGHTS, sam2_cfg_path=SAM2_CONFIG, sam2_ckpt_path=SAM2_CHECKPOINT, device_used=DEVICE_STR):
     """
-    Loads YOLOv11s and SAM2.
-    Ensures SAM2 model precision matches the global USE_BFLOAT16 setting.
+    Loads YOLOv11s and SAM2 into memory.
+    Crucially, it handles the datatype casting for SAM2 to prevent CUDA errors.
     """
     print(f"Loading YOLO from {yolo_weights_path}...")
     if not os.path.exists(yolo_weights_path):
@@ -122,16 +130,18 @@ def initialize_models(yolo_weights_path=YOLO_WEIGHTS, sam2_cfg_path=SAM2_CONFIG,
     sam2_predictor = build_sam2_video_predictor(sam2_cfg_path, sam2_ckpt_path, device=device_used)
     
     # --- PRECISION ALIGNMENT ---
+    # If using a modern GPU, cast the model to BFloat16 to match the Autocast context later.
     if USE_BFLOAT16:
         print("  -> Casting SAM2 model to bfloat16 (Speed Optimization)")
         sam2_predictor.model.to(dtype=torch.bfloat16)
     else:
-        # On CPU or older GPUs, keep float32 (Default)
+        # On CPU or older GPUs, keep float32 (Default) to avoid errors.
         pass
         
     return yolo, sam2_predictor
 
 def resize_for_display(img, target_height):
+    """Resizes image for GUI display while maintaining aspect ratio."""
     h, w = img.shape[:2]
     scale = target_height / h
     new_w = int(w * scale)
@@ -139,6 +149,9 @@ def resize_for_display(img, target_height):
     return resized, scale
 
 def draw_hud(img, idx, total, current_id):
+    """
+    Draws the overlay (HUD) with frame info, instructions, and landmark status.
+    """
     msg1 = f"Frame: {idx}/{total-1}"
     status = []
     status.append(f"NAS: {'[Saved]' if current_id > 0 else '[Click]'}")
@@ -160,6 +173,10 @@ def draw_hud(img, idx, total, current_id):
     return img
 
 def interactive_multiframe_crop(video_path, display_height):
+    """
+    Opens the video and lets user draw a crop box.
+    Allows scrubbing frames ('a'/'s') to ensure the box fits the head in ALL frames.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video {video_path} for cropping.")
@@ -222,6 +239,10 @@ def interactive_multiframe_crop(video_path, display_height):
     return sx, sy, sw, sh
 
 def extract_frames_with_crop():
+    """
+    Extracts frames based on user crop.
+    Optimization: Only processes every 10th frame (FRAME_SKIP=10) to speed up tracking.
+    """
     if os.path.exists(FRAME_DIR):
         shutil.rmtree(FRAME_DIR) 
     os.makedirs(FRAME_DIR, exist_ok=True)
@@ -245,7 +266,7 @@ def extract_frames_with_crop():
     offset_x, offset_y = sx, sy
     cap = cv2.VideoCapture(VIDEO_PATH)
     
-    FRAME_SKIP = 10 
+    FRAME_SKIP = 10 # Speed Optimization: Process every 10th frame
     frames = []
     idx = 0
     frame_count = 0
@@ -272,6 +293,10 @@ def extract_frames_with_crop():
     return frames, (offset_x, offset_y)
 
 def order_electrodes_head_relative(smoothed_data):
+    """
+    Sorts electrodes (Front-to-Back, Left-to-Right) using a head-relative coordinate system
+    derived from the 3 landmarks (NAS, LPA, RPA). This ensures consistent ordering regardless of head tilt.
+    """
     relative_positions = {}
     print(f"Calculating head-relative positions across {len(smoothed_data)} frames...")
 
@@ -310,6 +335,7 @@ def order_electrodes_head_relative(smoothed_data):
     return sorted_electrodes
 
 def is_global_duplicate(candidate, existing_points, radius):
+    """Checks if a new point is too close to an existing one (prevents duplicate IDs)."""
     for pt in existing_points[3:]: 
         if np.linalg.norm(np.array(candidate) - np.array(pt)) < radius:
             return True
@@ -321,11 +347,12 @@ def _resize_mask_to_disp(mask, disp_shape):
     return cv2.resize(mask.astype(np.uint8), (disp_shape[1], disp_shape[0]), interpolation=cv2.INTER_NEAREST) > 0
 
 def _draw_mask_overlay(disp, cap_mask, alpha=0.45):
+    """Draws the cyan 'Safe Zone' overlay on the screen."""
     out = disp.copy()
     cap = _resize_mask_to_disp(cap_mask, disp.shape)
     
     overlay = out.copy()
-    overlay[cap == 0] = (overlay[cap == 0] * 0.35).astype(np.uint8)
+    overlay[cap == 0] = (overlay[cap == 0] * 0.35).astype(np.uint8) # Darken background
     
     cap_cnts, _ = cv2.findContours(cap.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(out, cap_cnts, -1, (0, 255, 255), 2) 
@@ -334,6 +361,7 @@ def _draw_mask_overlay(disp, cap_mask, alpha=0.45):
     return out
 
 def _expand_mask(mask, expansion=1.10):
+    """Expands the mask slightly to include edge electrodes."""
     if expansion <= 1.0: return mask.astype(bool)
     ys, xs = np.where(mask > 0)
     if len(xs) == 0: return mask.astype(bool)
@@ -348,6 +376,7 @@ def _expand_mask(mask, expansion=1.10):
     return (cv2.dilate(mask.astype(np.uint8), kernel, iterations=1) > 0)
 
 def _manual_click_cap_mask(img, sam2_predictor, state, frame_idx, display_h):
+    """Fallback: Lets user manually click center of cap if auto-detect fails."""
     disp, scale = resize_for_display(img, display_h)
     clicks = []
     def cb(event, x, y, flags, param):
@@ -370,12 +399,14 @@ def _manual_click_cap_mask(img, sam2_predictor, state, frame_idx, display_h):
     return cap_mask
 
 def _auto_cap_mask(img, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None, min_area_frac=0.03, max_area_frac=0.70, use_yolo=True):
+    """
+    Uses SAM2's AutomaticMaskGenerator to find the cap without user input.
+    """
     print("\n[Auto-Mask] Initializing SAM2 Automatic Mask Generator...")
-    # NOTE: The auto-mask generator creates its own internal model.
     model = build_sam2(sam2_cfg_path, sam2_ckpt_path, device=device_used)
     
     # --- PRECISION ALIGNMENT ---
-    # Must match the global setting derived from hardware support
+    # Ensure this model matches the precision set globally (USE_BFLOAT16)
     if USE_BFLOAT16:
         model.to(dtype=torch.bfloat16)
 
@@ -397,6 +428,7 @@ def _auto_cap_mask(img, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None, m
     area_min = H * W * float(min_area_frac)
     area_max = H * W * float(max_area_frac)
 
+    # Use YOLO to find masks that contain electrodes (better score)
     centers = []
     if use_yolo and yolo is not None:
         res = yolo.predict(img, conf=0.20, verbose=False)
@@ -427,6 +459,9 @@ def _auto_cap_mask(img, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None, m
     return best
 
 def create_cap_mask_all_features(first_img, sam2_predictor, state, frame_idx, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None):
+    """
+    Manages the 'Safe Zone' creation: Tries Auto, falls back to Manual if user rejects.
+    """
     mode = "auto"
     cap_mask = None
 
@@ -464,6 +499,10 @@ def create_cap_mask_all_features(first_img, sam2_predictor, state, frame_idx, sa
         cv2.destroyWindow(win)
 
 def precompute_cap_masks(sam2_predictor, state, frame_names, device_str):
+    """
+    Propagates the Cap Mask (ID 999) through all frames ahead of time.
+    This lets us instantly check if a click is valid or invalid later.
+    """
     print("Pre-tracking cap mask for all frames...")
     cap_masks = {}
     
@@ -525,7 +564,7 @@ def main():
             # --- Check: Is click inside the Cap Mask? ---
             current_cap_mask = cap_masks_cache.get(current_idx)
             is_valid = True
-            if current_id >= 3: # Enforce for electrodes
+            if current_id >= 3: # Enforce for electrodes (skip landmarks 0-2)
                 if current_cap_mask is None: is_valid = False
                 else:
                     h, w = current_cap_mask.shape
@@ -536,6 +575,7 @@ def main():
                 print(">>> CLICK REJECTED: Outside Cap Mask")
                 return
 
+            # Add electrode point to SAM2 State
             sam2_predictor.add_new_points_or_box(state, frame_idx=current_idx, obj_id=current_id, points=[np.array((real_x, real_y), dtype=np.float32)], labels=[1])
             global_points.append((real_x, real_y))
             flash_points.append((real_x, real_y, (0, 255, 0) if current_id < 3 else (0, 0, 255), time.time()))
@@ -550,7 +590,7 @@ def main():
         if img is None: break
         disp, _ = resize_for_display(img, CONFIG["display_height"])
         
-        # Visualize Cap Mask
+        # Visualize Cap Mask (Darken outside area)
         current_cap_mask = cap_masks_cache.get(current_idx)
         if current_cap_mask is not None:
             mask_overlay = disp.copy()
@@ -558,7 +598,7 @@ def main():
             mask_overlay[resized_mask == 0] = mask_overlay[resized_mask == 0] // 2
             disp = cv2.addWeighted(disp, 0.7, mask_overlay, 0.3, 0)
 
-        # Visualize Clicks
+        # Visualize Click Feedback
         now = time.time()
         flash_points[:] = [p for p in flash_points if now - p[3] < 1.0]
         for (fx, fy, col, _) in flash_points:
@@ -568,6 +608,7 @@ def main():
         cv2.imshow("Pipeline", disp)
         
         key = cv2.waitKey(1) & 0xFF
+        # Navigation
         if key == ord('s'): current_idx = min(current_idx + 15, len(frame_names)-1)
         elif key == ord('a'): current_idx = max(current_idx - 15, 0)
         elif key == ord('q'): sys.exit(0)
@@ -599,7 +640,7 @@ def main():
             else: break
     cv2.destroyAllWindows()
 
-    # 7. Final Tracking
+    # 7. Final Tracking Phase
     print("\n--- SAM2 Tracking ---")
     tracking = {}
     
@@ -620,7 +661,7 @@ def main():
 
     with open(RAW_FILE, "wb") as f: pickle.dump(tracking, f)
 
-    # 8. Smoothing & Ordering
+    # 8. Post-Processing: Smoothing
     smoothed = {}
     for f_idx, objs in tracking.items(): smoothed[f_idx] = dict(objs)
     traj = {}
@@ -641,6 +682,8 @@ def main():
             except: pass
     
     with open(SMOOTH_FILE, "wb") as f: pickle.dump(smoothed, f)
+    
+    # 9. Post-Processing: Ordering
     ordered = order_electrodes_head_relative(smoothed)
     if ordered:
         with open(ORDER_FILE, "w") as f: json.dump([e["id"] for e in ordered], f)
