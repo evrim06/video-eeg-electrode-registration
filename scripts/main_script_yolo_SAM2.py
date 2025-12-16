@@ -3,6 +3,7 @@ import os
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 import pickle
 import json
 import shutil
@@ -12,683 +13,641 @@ import urllib.request
 from tqdm import tqdm
 from scipy.signal import savgol_filter
 from ultralytics import YOLO
-import sam2
-from sam2.build_sam import build_sam2_video_predictor, build_sam2
-from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from contextlib import nullcontext
 
-# ==================================================================================================
-# 1. CONFIGURATION & GLOBAL SETTINGS
-# ==================================================================================================
 
-# --- Device & Precision Selection ---
-# Automatically detect hardware to choose the fastest possible execution mode.
+# STEP 1: APPLY SAM2 DTYPE PATCH BEFORE IMPORTING SAM2
+
+#Remove this patch once SAM2 upstream fixes dtype handling
+
+print("=" * 70)
+print("APPLYING SAM2 DTYPE PATCH v2...")
+print("=" * 70)
+
+torch.set_default_dtype(torch.float32)
+
+import sam2
+from sam2.modeling.memory_attention import MemoryAttentionLayer, MemoryAttention
+from sam2.modeling.sam.transformer import RoPEAttention
+
+# Store original forward methods
+_original_rope_attention_forward = RoPEAttention.forward
+_original_memory_attention_layer_forward = MemoryAttentionLayer.forward
+_original_memory_attention_forward = MemoryAttention.forward
+
+
+def _convert_to_dtype(obj, target_dtype):
+    """
+    Recursively convert tensors to target dtype.
+    Handles: tensors, lists, tuples, and None.
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, torch.Tensor):
+        if obj.is_floating_point() and obj.dtype != target_dtype:
+            return obj.to(target_dtype)
+        return obj
+    elif isinstance(obj, list):
+        return [_convert_to_dtype(item, target_dtype) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_convert_to_dtype(item, target_dtype) for item in obj)
+    elif isinstance(obj, dict):
+        return {k: _convert_to_dtype(v, target_dtype) for k, v in obj.items()}
+    else:
+        return obj
+
+
+def _get_model_dtype(module):
+    """Get the dtype of the module's parameters."""
+    for param in module.parameters():
+        if param.is_floating_point():
+            return param.dtype
+    return torch.float32
+
+
+def _patched_rope_attention_forward(self, q, k, v, num_k_exclude_rope=0):
+    """
+    Patched RoPEAttention.forward that ensures all tensors have matching dtype.
+    """
+    target_dtype = _get_model_dtype(self)
+    
+    q = _convert_to_dtype(q, target_dtype)
+    k = _convert_to_dtype(k, target_dtype)
+    v = _convert_to_dtype(v, target_dtype)
+    
+    return _original_rope_attention_forward(self, q, k, v, num_k_exclude_rope)
+
+
+def _patched_memory_attention_layer_forward(self, tgt, memory, pos=None, query_pos=None, num_k_exclude_rope=0):
+    """
+    Patched MemoryAttentionLayer.forward that ensures dtype consistency.
+    """
+    target_dtype = _get_model_dtype(self)
+    
+    tgt = _convert_to_dtype(tgt, target_dtype)
+    memory = _convert_to_dtype(memory, target_dtype)
+    pos = _convert_to_dtype(pos, target_dtype)
+    query_pos = _convert_to_dtype(query_pos, target_dtype)
+    
+    return _original_memory_attention_layer_forward(self, tgt, memory, pos, query_pos, num_k_exclude_rope)
+
+
+def _patched_memory_attention_forward(self, curr, memory, curr_pos=None, memory_pos=None, num_obj_ptr_tokens=0):
+    """
+    Patched MemoryAttention.forward that ensures dtype consistency.
+    Handles both tensors and lists of tensors.
+    """
+    target_dtype = _get_model_dtype(self)
+    
+    curr = _convert_to_dtype(curr, target_dtype)
+    memory = _convert_to_dtype(memory, target_dtype)
+    curr_pos = _convert_to_dtype(curr_pos, target_dtype)
+    memory_pos = _convert_to_dtype(memory_pos, target_dtype)
+    
+    return _original_memory_attention_forward(self, curr, memory, curr_pos, memory_pos, num_obj_ptr_tokens)
+
+
+# Apply patches
+RoPEAttention.forward = _patched_rope_attention_forward
+MemoryAttentionLayer.forward = _patched_memory_attention_layer_forward
+MemoryAttention.forward = _patched_memory_attention_forward
+
+print("✓ SAM2 dtype patch v2 applied!")
+
+# Now import rest of SAM2
+from sam2.build_sam import build_sam2_video_predictor, build_sam2
+from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+
+
+# STEP 2: CONFIGURATION
+
+
 if torch.cuda.is_available():
     DEVICE_STR = "cuda"
-    # Check if this GPU supports BFloat16 (e.g., NVIDIA Ampere/30-series or newer).
-    # BFloat16 is crucial for preventing dtype mismatch errors in SAM2 on CUDA.
-    if torch.cuda.is_bf16_supported():
-        USE_BFLOAT16 = True
-        print("--- Using device: CUDA (BFloat16 Supported) ---")
-        # Enable TF32 for faster matrix math on supported GPUs
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    else:
-        USE_BFLOAT16 = False
-        print("--- Using device: CUDA (BFloat16 NOT Supported - Fallback to Float32) ---")
+    DEVICE = torch.device("cuda")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    print(f"Device: CUDA")
 else:
     DEVICE_STR = "cpu"
-    USE_BFLOAT16 = False
-    print("--- Using device: CPU (Float32 Mode) ---")
+    DEVICE = torch.device("cpu")
+    print(f"Device: CPU")
 
-# --- Dynamic Path Management ---
-# Automatically find the script's folder so it runs on any computer without editing paths.
+print("=" * 70)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.dirname(SCRIPT_DIR)  # Assume project root is one level up
+BASE_DIR = os.path.dirname(SCRIPT_DIR)
 
-print(f"Project Root detected at: {BASE_DIR}")
+print(f"Project Root: {BASE_DIR}")
 
-# Define file paths relative to the project root
 VIDEO_PATH      = os.path.join(BASE_DIR, "data", "IMG_2763.mp4")
 FRAME_DIR       = os.path.join(BASE_DIR, "frames")
 RESULTS_DIR     = os.path.join(BASE_DIR, "results")
 CHECKPOINT_DIR  = os.path.join(BASE_DIR, "checkpoints")
 
-# Output files
 RAW_FILE        = os.path.join(RESULTS_DIR, "tracking_raw.pkl")
 SMOOTH_FILE     = os.path.join(RESULTS_DIR, "tracking_smoothed.pkl")
 ORDER_FILE      = os.path.join(RESULTS_DIR, "electrode_order.json")
 CROP_INFO_FILE  = os.path.join(RESULTS_DIR, "crop_info.json")
 
-# --- YOLO Configuration ---
-# Path to your custom trained YOLOv11s weights for electrode detection
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "runs", "detect", "train4", "weights", "best.pt")
 
-# --- SAM2 Model Configuration ---
-# Use the 'Small' model for speed (~10x faster than Large).
 SAM2_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "sam2_hiera_small.pt")
 SAM2_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt"
 
-# Download SAM2 weights automatically if missing
 if not os.path.exists(SAM2_CHECKPOINT):
-    print(f"Downloading SAM2 checkpoint to {SAM2_CHECKPOINT}...")
+    print(f"Downloading SAM2 checkpoint...")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     urllib.request.urlretrieve(SAM2_CHECKPOINT_URL, SAM2_CHECKPOINT)
-else:
-    print(f"SAM2 Checkpoint found at: {SAM2_CHECKPOINT}")
 
-# --- SAM2 Config File Logic ---
-# The config file must match the model size (e.g., 'sam2_hiera_s.yaml' for small)
 SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 SAM2_CONFIG = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2", SAM2_CONFIG_NAME)
 
-# Fallback: Look for config in project folder if not found in python package
 if not os.path.exists(SAM2_CONFIG):
-    PROJECT_CONFIG = os.path.join(BASE_DIR, "configs", "sam2", SAM2_CONFIG_NAME)
-    PROJECT_CONFIG_SIMPLE = os.path.join(BASE_DIR, "configs", SAM2_CONFIG_NAME)
-    
-    if os.path.exists(PROJECT_CONFIG):
-        SAM2_CONFIG = PROJECT_CONFIG
-    elif os.path.exists(PROJECT_CONFIG_SIMPLE):
-        SAM2_CONFIG = PROJECT_CONFIG_SIMPLE
-    else:
-        print(f"Warning: Config not found at {SAM2_CONFIG} or in project configs.")
-        SAM2_CONFIG = os.path.join(SCRIPT_DIR, SAM2_CONFIG_NAME)
+    for p in [os.path.join(BASE_DIR, "configs", "sam2", SAM2_CONFIG_NAME),
+              os.path.join(BASE_DIR, "configs", SAM2_CONFIG_NAME)]:
+        if os.path.exists(p):
+            SAM2_CONFIG = p
+            break
 
-print(f"Using SAM2 Config: {SAM2_CONFIG}")
+print(f"SAM2 Config: {SAM2_CONFIG}")
 
-# --- General Pipeline Settings ---
 CONFIG = {
-    "display_height": 800,      # Height of GUI window
-    "duplicate_radius": 50,     # Pixels: Ignore new points if they are this close to existing ones
-    "yolo_conf": 0.25,          # Confidence threshold for YOLO
-    "smooth_window": 7,         # Window size for Savitzky-Golay smoothing
-    "poly_order": 2,            # Polynomial order for smoothing
-    "cap_mask_expansion": 1.10,   # Expand auto-detected cap mask by 10% (safety margin)
-    "cap_min_area_frac": 0.03,    # Reject auto-masks smaller than 3% of image
-    "cap_max_area_frac": 0.70,    # Reject auto-masks larger than 70% of image
-    "cap_confirm_alpha": 0.45,    # Opacity for the mask visualization overlay
-    "cap_autodetect_use_yolo": True, # Use YOLO detections to verify auto-masks
+    "frame_skip": 10,  # less skipped frames = better detection          
+    "flash_duration": 3.0,      
+    "display_height": 800,      
+    "duplicate_radius": 50,     
+    "yolo_conf": 0.25,          
+    "smooth_window": 7,         
+    "poly_order": 2,            
+    "cap_mask_expansion": 1.10,   
+    "cap_min_area_frac": 0.03,    
+    "cap_max_area_frac": 0.70,    
+    "cap_confirm_alpha": 0.45,    
+    "cap_autodetect_use_yolo": True, 
 }
 
-# ==================================================================================================
-# 2. HELPER FUNCTIONS
-# ==================================================================================================
+# STEP 3: MODEL INITIALIZATION
 
-def initialize_models(yolo_weights_path=YOLO_WEIGHTS, sam2_cfg_path=SAM2_CONFIG, sam2_ckpt_path=SAM2_CHECKPOINT, device_used=DEVICE_STR):
-    """
-    Loads YOLOv11s and SAM2 into memory.
-    Crucially, it handles the datatype casting for SAM2 to prevent CUDA errors.
-    """
-    print(f"Loading YOLO from {yolo_weights_path}...")
-    if not os.path.exists(yolo_weights_path):
-        print(f"ERROR: Custom YOLO weights not found at {yolo_weights_path}")
+
+def initialize_models():
+    print(f"\nLoading YOLO from {YOLO_WEIGHTS}...")
+    if not os.path.exists(YOLO_WEIGHTS):
+        print(f"ERROR: YOLO weights not found")
         sys.exit(1)
-    yolo = YOLO(yolo_weights_path)
+    yolo = YOLO(YOLO_WEIGHTS)
 
     print("Loading SAM2 Video Predictor...")
-    sam2_predictor = build_sam2_video_predictor(sam2_cfg_path, sam2_ckpt_path, device=device_used)
+    sam2_predictor = build_sam2_video_predictor(SAM2_CONFIG, SAM2_CHECKPOINT, device=DEVICE_STR)
     
-    # --- PRECISION ALIGNMENT ---
-    # If using a modern GPU, cast the model to BFloat16 to match the Autocast context later.
-    if USE_BFLOAT16:
-        print("  -> Casting SAM2 model to bfloat16 (Speed Optimization)")
-        sam2_predictor.model.to(dtype=torch.bfloat16)
-    else:
-        # On CPU or older GPUs, keep float32 (Default) to avoid errors.
-        pass
-        
+    # Convert to Float32
+    sam2_predictor = sam2_predictor.float()
+    sam2_predictor.eval()
+    
+    print("✓ Models initialized\n")
     return yolo, sam2_predictor
 
+
+def build_sam2_float32():
+    model = build_sam2(SAM2_CONFIG, SAM2_CHECKPOINT, device=DEVICE_STR)
+    model = model.float()
+    model.eval()
+    return model
+
+
+
+# STEP 4: HELPER FUNCTIONS
+
+
 def resize_for_display(img, target_height):
-    """Resizes image for GUI display while maintaining aspect ratio."""
     h, w = img.shape[:2]
     scale = target_height / h
-    new_w = int(w * scale)
-    resized = cv2.resize(img, (new_w, target_height))
-    return resized, scale
+    return cv2.resize(img, (int(w * scale), target_height)), scale
+
 
 def draw_hud(img, idx, total, current_id):
-    """
-    Draws the overlay (HUD) with frame info, instructions, and landmark status.
-    """
     msg1 = f"Frame: {idx}/{total-1}"
-    status = []
-    status.append(f"NAS: {'[Saved]' if current_id > 0 else '[Click]'}")
-    status.append(f"LPA: {'[Saved]' if current_id > 1 else '[Click]'}")
-    status.append(f"RPA: {'[Saved]' if current_id > 2 else '[Click]'}")
+    status = [f"NAS: {'[Saved]' if current_id > 0 else '[Click]'}",
+              f"LPA: {'[Saved]' if current_id > 1 else '[Click]'}",
+              f"RPA: {'[Saved]' if current_id > 2 else '[Click]'}"]
 
     if current_id <= 2:
         msg2 = " -> ".join(status)
-        color_status = (0, 255, 255) 
+        color = (0, 255, 255)
     else:
-        electrodes_done = current_id - 3
-        msg2 = f"Landmarks: [Saved] | Electrodes Detected: {electrodes_done}"
-        color_status = (0, 255, 0)   
+        msg2 = f"Landmarks: [Saved] | Electrodes: {current_id - 3}"
+        color = (0, 255, 0)
 
-    cv2.rectangle(img, (0, 0), (600, 100), (0, 0, 0), -1)
-    cv2.putText(img, msg1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    cv2.putText(img, msg2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_status, 2)
-    cv2.putText(img, "Controls: s=fwd, a=back, d=detect, space=finish, q=quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.rectangle(img, (0, 0), (img.shape[1], 130), (0, 0, 0), -1)
+    cv2.putText(img, msg1, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(img, msg2, (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    cv2.putText(img, "NAV: [S] Fwd (+15) | [A] Back (-15) | [Q] Quit", (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.putText(img, "ACT: [D] YOLO Detect | [Click] Add | [Space] Done", (15, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 1)
     return img
 
-def interactive_multiframe_crop(video_path, display_height):
-    """
-    Opens the video and lets user draw a crop box.
-    Allows scrubbing frames ('a'/'s') to ensure the box fits the head in ALL frames.
-    """
+
+def interactive_crop(video_path, display_height):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open video {video_path} for cropping.")
+        raise RuntimeError(f"Could not open {video_path}")
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    current_idx = 0
-    roi = None
-    drawing = False
-    start_pt = None
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    idx, roi, drawing, start = 0, None, False, None
 
-    def on_mouse(event, x, y, flags, param):
-        nonlocal roi, drawing, start_pt
+    def mouse(event, x, y, flags, param):
+        nonlocal roi, drawing, start
         if event == cv2.EVENT_LBUTTONDOWN:
-            drawing = True
-            start_pt = (x, y)
-            roi = None
+            drawing, start, roi = True, (x, y), None
         elif event == cv2.EVENT_MOUSEMOVE and drawing:
-            x0, y0 = start_pt
-            roi = (min(x0, x), min(y0, y), abs(x - x0), abs(y - y0))
+            roi = (min(start[0], x), min(start[1], y), abs(x - start[0]), abs(y - start[1]))
         elif event == cv2.EVENT_LBUTTONUP:
             drawing = False
 
-    cv2.namedWindow("Crop Preview")
-    cv2.setMouseCallback("Crop Preview", on_mouse)
+    cv2.namedWindow("Crop")
+    cv2.setMouseCallback("Crop", mouse)
 
     while True:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, current_idx)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
         if not ret: break
 
         disp, scale = resize_for_display(frame, display_height)
         show = disp.copy()
+        cv2.rectangle(show, (0, 0), (show.shape[1], 90), (0, 0, 0), -1)
+        cv2.putText(show, "CROP: Draw box around cap", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(show, "A/S: Move frames | SPACE: Confirm", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 1)
 
-        cv2.rectangle(show, (0, 0), (show.shape[1], 120), (0, 0, 0), -1)
-        cv2.putText(show, "CROP MODE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(show, "A / S : Move frames | SPACE: Confirm", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 255, 200), 2)
-        cv2.putText(show, "Draw ONE box containing cap in ALL frames", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 255, 200), 2)
+        if roi:
+            cv2.rectangle(show, (roi[0], roi[1]), (roi[0]+roi[2], roi[1]+roi[3]), (0, 255, 255), 2)
 
-        if roi is not None:
-            x, y, w, h = roi
-            cv2.rectangle(show, (x, y), (x + w, y + h), (0, 255, 255), 2)
+        cv2.imshow("Crop", show)
+        k = cv2.waitKey(30) & 0xFF
 
-        cv2.imshow("Crop Preview", show)
-        key = cv2.waitKey(30) & 0xFF
+        if k == ord('a'): idx = max(0, idx - 15)
+        elif k == ord('s'): idx = min(total - 1, idx + 15)
+        elif k in (13, 32) and roi: break
+        elif k == ord('q'): sys.exit(0)
 
-        if key == ord('a'): current_idx = max(0, current_idx - 15) 
-        elif key == ord('s'): current_idx = min(total_frames - 1, current_idx + 15) 
-        elif key in (13, 32): 
-            if roi is not None: break
-        elif key == ord('q'): sys.exit(0)
-
-    cv2.destroyWindow("Crop Preview")
+    cv2.destroyWindow("Crop")
     cap.release()
 
-    x, y, w, h = roi
-    sx = int(x / scale)
-    sy = int(y / scale)
-    sw = int(w / scale)
-    sh = int(h / scale)
-    return sx, sy, sw, sh
+    return int(roi[0]/scale), int(roi[1]/scale), int(roi[2]/scale), int(roi[3]/scale)
 
-def extract_frames_with_crop():
-    """
-    Extracts frames based on user crop.
-    Optimization: Only processes every 10th frame (FRAME_SKIP=10) to speed up tracking.
-    """
+
+def extract_frames():
     if os.path.exists(FRAME_DIR):
-        shutil.rmtree(FRAME_DIR) 
+        shutil.rmtree(FRAME_DIR)
     os.makedirs(FRAME_DIR, exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    print("\n--- Interactive multi-frame cropping ---")
-    try:
-        sx, sy, sw, sh = interactive_multiframe_crop(VIDEO_PATH, CONFIG["display_height"])
-    except Exception as e:
-        print(f"Cropping failed or cancelled: {e}")
-        sys.exit(1)
+    print("\n--- Cropping ---")
+    sx, sy, sw, sh = interactive_crop(VIDEO_PATH, CONFIG["display_height"])
 
     if sw < 50 or sh < 50:
-        print("Warning: Crop too small. Using full frame.")
-        cap_tmp = cv2.VideoCapture(VIDEO_PATH)
-        ret, frame = cap_tmp.read()
-        cap_tmp.release()
-        sy, sx = 0, 0
-        sh, sw = frame.shape[:2]
+        cap = cv2.VideoCapture(VIDEO_PATH)
+        ret, frame = cap.read()
+        cap.release()
+        sx, sy, sw, sh = 0, 0, frame.shape[1], frame.shape[0]
 
-    offset_x, offset_y = sx, sy
     cap = cv2.VideoCapture(VIDEO_PATH)
-    
-    FRAME_SKIP = 10 # Speed Optimization: Process every 10th frame
-    frames = []
-    idx = 0
-    frame_count = 0
+    skip = CONFIG["frame_skip"]
+    frames, idx, count = [], 0, 0
 
-    print(f"Extracting cropped frames (every {FRAME_SKIP}th frame)...")
+    print(f"Extracting frames (skip={skip})...")
     while True:
         ret, frame = cap.read()
         if not ret: break
-
-        if frame_count % FRAME_SKIP == 0:
-            crop = frame[sy:sy + sh, sx:sx + sw]
-            fname = f"{idx:05d}.jpg"
-            cv2.imwrite(os.path.join(FRAME_DIR, fname), crop)
-            frames.append(fname)
+        if count % skip == 0:
+            crop = frame[sy:sy+sh, sx:sx+sw]
+            cv2.imwrite(os.path.join(FRAME_DIR, f"{idx:05d}.jpg"), crop)
+            frames.append(f"{idx:05d}.jpg")
             idx += 1
-        frame_count += 1
+        count += 1
     cap.release()
 
-    crop_info = {"x": sx, "y": sy, "w": sw, "h": sh, "skip": FRAME_SKIP}
     with open(CROP_INFO_FILE, "w") as f:
-        json.dump(crop_info, f, indent=2)
+        json.dump({"x": sx, "y": sy, "w": sw, "h": sh, "skip": skip}, f)
 
-    print(f"Extracted {len(frames)} cropped frames.")
-    return frames, (offset_x, offset_y)
+    print(f"✓ Extracted {len(frames)} frames")
+    return frames, (sx, sy)
 
-def order_electrodes_head_relative(smoothed_data):
-    """
-    Sorts electrodes (Front-to-Back, Left-to-Right) using a head-relative coordinate system
-    derived from the 3 landmarks (NAS, LPA, RPA). This ensures consistent ordering regardless of head tilt.
-    """
-    relative_positions = {}
-    print(f"Calculating head-relative positions across {len(smoothed_data)} frames...")
 
-    for frame_idx, objects in smoothed_data.items():
-        if 0 not in objects or 1 not in objects or 2 not in objects: continue
-        if objects[0] is None or objects[1] is None or objects[2] is None: continue
+def order_electrodes(smoothed):
+    positions = {}
+    for fidx, objs in smoothed.items():
+        if not all(i in objs and objs[i] for i in [0, 1, 2]):
+            continue
+        NAS, LPA, RPA = np.array(objs[0]), np.array(objs[1]), np.array(objs[2])
+        center = (LPA + RPA) / 2
+        ux = (RPA - LPA) / (np.linalg.norm(RPA - LPA) + 1e-8)
+        uy = (NAS - center) / (np.linalg.norm(NAS - center) + 1e-8)
+        for oid, coords in objs.items():
+            if oid < 3 or coords is None: continue
+            v = np.array(coords) - center
+            positions.setdefault(oid, []).append([np.dot(v, ux), np.dot(v, uy)])
 
-        NAS, LPA, RPA = np.array(objects[0]), np.array(objects[1]), np.array(objects[2])
-        ear_center = (LPA + RPA) / 2.0
-        
-        vec_x = RPA - LPA
-        norm_x = np.linalg.norm(vec_x)
-        if norm_x == 0: continue
-        unit_x = vec_x / norm_x
-        
-        vec_y = NAS - ear_center
-        norm_y = np.linalg.norm(vec_y)
-        if norm_y == 0: continue
-        unit_y = vec_y / norm_y
+    stats = [{"id": oid, "y": np.mean(pts, axis=0)[1], "x": np.mean(pts, axis=0)[0]}
+             for oid, pts in positions.items() if len(pts) >= 5]
+    return sorted(stats, key=lambda e: (-e["y"], e["x"]))
 
-        for obj_id, coords in objects.items():
-            if obj_id < 3 or coords is None: continue
-            P = np.array(coords)
-            v = P - ear_center
-            px = np.dot(v, unit_x) 
-            py = np.dot(v, unit_y) 
-            relative_positions.setdefault(obj_id, []).append([px, py])
 
-    final_stats = []
-    for obj_id, rel_list in relative_positions.items():
-        if len(rel_list) < 5: continue 
-        avg_rel = np.mean(rel_list, axis=0)
-        final_stats.append({"id": obj_id, "rel_x": avg_rel[0], "rel_y": avg_rel[1]})
+def is_duplicate(pt, existing, radius):
+    return any(np.linalg.norm(np.array(pt) - np.array(p)) < radius for p in existing[3:])
 
-    sorted_electrodes = sorted(final_stats, key=lambda e: (-e["rel_y"], e["rel_x"]))
-    return sorted_electrodes
 
-def is_global_duplicate(candidate, existing_points, radius):
-    """Checks if a new point is too close to an existing one (prevents duplicate IDs)."""
-    for pt in existing_points[3:]: 
-        if np.linalg.norm(np.array(candidate) - np.array(pt)) < radius:
-            return True
-    return False
 
-# --- CAP MASK UTILS ---
+# STEP 5: CAP MASK FUNCTIONS
 
-def _resize_mask_to_disp(mask, disp_shape):
-    return cv2.resize(mask.astype(np.uint8), (disp_shape[1], disp_shape[0]), interpolation=cv2.INTER_NEAREST) > 0
 
-def _draw_mask_overlay(disp, cap_mask, alpha=0.45):
-    """Draws the cyan 'Safe Zone' overlay on the screen."""
-    out = disp.copy()
-    cap = _resize_mask_to_disp(cap_mask, disp.shape)
-    
-    overlay = out.copy()
-    overlay[cap == 0] = (overlay[cap == 0] * 0.35).astype(np.uint8) # Darken background
-    
-    cap_cnts, _ = cv2.findContours(cap.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, cap_cnts, -1, (0, 255, 255), 2) 
-    
-    cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0, out)
-    return out
-
-def _expand_mask(mask, expansion=1.10):
-    """Expands the mask slightly to include edge electrodes."""
+def expand_mask(mask, expansion=1.10):
     if expansion <= 1.0: return mask.astype(bool)
     ys, xs = np.where(mask > 0)
     if len(xs) == 0: return mask.astype(bool)
-    
-    h, w = (ys.max() - ys.min() + 1), (xs.max() - xs.min() + 1)
-    base = max(h, w)
-    
-    k = max(3, int(base * (expansion - 1.0) * 0.5))
-    if k % 2 == 0: k += 1 
-    
-    kernel = np.ones((k, k), np.uint8)
-    return (cv2.dilate(mask.astype(np.uint8), kernel, iterations=1) > 0)
+    k = max(3, int(max(ys.ptp(), xs.ptp()) * (expansion - 1) * 0.5))
+    if k % 2 == 0: k += 1
+    return cv2.dilate(mask.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
 
-def _manual_click_cap_mask(img, sam2_predictor, state, frame_idx, display_h):
-    """Fallback: Lets user manually click center of cap if auto-detect fails."""
+
+def draw_mask_overlay(disp, mask, alpha=0.45):
+    out = disp.copy()
+    m = cv2.resize(mask.astype(np.uint8), (disp.shape[1], disp.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+    overlay = out.copy()
+    overlay[m == 0] = (overlay[m == 0] * 0.35).astype(np.uint8)
+    cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out, cnts, -1, (0, 255, 255), 2)
+    cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0, out)
+    return out
+
+
+def manual_cap_mask(img, sam2, state, fidx, display_h):
+    """User clicks center of cap"""
     disp, scale = resize_for_display(img, display_h)
     clicks = []
-    def cb(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            clicks.append((int(x / scale), int(y / scale)))
-    
-    win = "CAP (manual): click center of cap | q=quit"
+
+    def cb(e, x, y, f, p):
+        if e == cv2.EVENT_LBUTTONDOWN:
+            clicks.append((int(x/scale), int(y/scale)))
+
+    win = "Click CENTER of cap | q=quit"
     cv2.namedWindow(win)
     cv2.setMouseCallback(win, cb)
     while not clicks:
         cv2.imshow(win, disp)
         if cv2.waitKey(1) & 0xFF == ord('q'): sys.exit(0)
     cv2.destroyWindow(win)
-    
-    _, out_obj_ids, out_mask_logits = sam2_predictor.add_new_points_or_box(
-        state, frame_idx=frame_idx, obj_id=999,
-        points=[np.array(clicks[0], dtype=np.float32)], labels=[1]
-    )
-    cap_mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze().astype(bool)
-    return cap_mask
 
-def _auto_cap_mask(img, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None, min_area_frac=0.03, max_area_frac=0.70, use_yolo=True):
-    """
-    Uses SAM2's AutomaticMaskGenerator to find the cap without user input.
-    """
-    print("\n[Auto-Mask] Initializing SAM2 Automatic Mask Generator...")
-    model = build_sam2(sam2_cfg_path, sam2_ckpt_path, device=device_used)
-    
-    # --- PRECISION ALIGNMENT ---
-    # Ensure this model matches the precision set globally (USE_BFLOAT16)
-    if USE_BFLOAT16:
-        model.to(dtype=torch.bfloat16)
+    with torch.inference_mode():
+        _, _, logits = sam2.add_new_points_or_box(
+            state, frame_idx=fidx, obj_id=999,
+            points=[np.array(clicks[0], dtype=np.float32)], labels=[1]
+        )
+    return (logits[0] > 0).cpu().numpy().squeeze().astype(bool)
 
-    amg = SAM2AutomaticMaskGenerator(model, points_per_side=32, pred_iou_thresh=0.88, stability_score_thresh=0.92, min_mask_region_area=500)
-    
-    print("[Auto-Mask] Generating masks...")
-    
-    # Use context manager ONLY if BFloat16 is enabled
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BFLOAT16 else nullcontext()
-    
-    with ctx:
-        masks = amg.generate(img)
-    
+
+def auto_cap_mask(img, yolo=None):
+    """Automatic cap mask using AMG"""
+    print("[Auto-Mask] Generating...")
+    model = build_sam2_float32()
+    amg = SAM2AutomaticMaskGenerator(model, points_per_side=32, pred_iou_thresh=0.88,
+                                      stability_score_thresh=0.92, min_mask_region_area=500)
+    masks = amg.generate(img)
     del amg, model
-    if device_used == "cuda": torch.cuda.empty_cache()
     gc.collect()
+    if DEVICE_STR == "cuda": torch.cuda.empty_cache()
 
     H, W = img.shape[:2]
-    area_min = H * W * float(min_area_frac)
-    area_max = H * W * float(max_area_frac)
+    amin, amax = H*W*CONFIG["cap_min_area_frac"], H*W*CONFIG["cap_max_area_frac"]
 
-    # Use YOLO to find masks that contain electrodes (better score)
     centers = []
-    if use_yolo and yolo is not None:
-        res = yolo.predict(img, conf=0.20, verbose=False)
+    if CONFIG["cap_autodetect_use_yolo"] and yolo:
+        res = yolo.predict(img, conf=0.2, verbose=False)
         if res and res[0].boxes is not None:
-            boxes = res[0].boxes.xyxy.cpu().numpy()
-            for b in boxes:
-                centers.append(((b[0]+b[2])/2.0, (b[1]+b[3])/2.0))
+            centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in res[0].boxes.xyxy.cpu().numpy()]
 
-    best, best_score = None, -1e9
+    best, score = None, -1e9
     for m in masks:
-        seg = m["segmentation"].astype(np.uint8)
-        area = float(seg.sum())
-        if not (area_min <= area <= area_max): continue
-        score = 0.0
-        if centers:
-            inside = 0
-            for (cx, cy) in centers:
-                if 0 <= int(cy) < H and 0 <= int(cx) < W and seg[int(cy), int(cx)] > 0:
-                    inside += 1
-            score += inside * 1000.0 
-        score += area 
-        if score > best_score:
-            best_score = score
-            best = seg.astype(bool)
+        area = float(m["segmentation"].sum())
+        if not (amin <= area <= amax): continue
+        s = area + sum(1000 for cx, cy in centers if 0 <= int(cy) < H and 0 <= int(cx) < W and m["segmentation"][int(cy), int(cx)])
+        if s > score: best, score = m["segmentation"].astype(bool), s
 
-    if best is None and masks: best = max(masks, key=lambda x: x["area"])["segmentation"].astype(bool)
-    if best is None: best = np.ones((H, W), dtype=bool)
-    return best
+    return best if best is not None else (max(masks, key=lambda x: x["area"])["segmentation"].astype(bool) if masks else np.ones((H, W), bool))
 
-def create_cap_mask_all_features(first_img, sam2_predictor, state, frame_idx, sam2_cfg_path, sam2_ckpt_path, device_used, yolo=None):
-    """
-    Manages the 'Safe Zone' creation: Tries Auto, falls back to Manual if user rejects.
-    """
-    mode = "auto"
-    cap_mask = None
+
+def create_cap_mask(img, sam2, state, yolo):
+    """Full UX for cap mask - defaults to manual"""
+    mode = "manual"
 
     while True:
         if mode == "auto":
-            cap_mask = _auto_cap_mask(first_img, sam2_cfg_path, sam2_ckpt_path, device_used, yolo, CONFIG["cap_min_area_frac"], CONFIG["cap_max_area_frac"], CONFIG["cap_autodetect_use_yolo"])
+            mask = auto_cap_mask(img, yolo)
         else:
-            cap_mask = _manual_click_cap_mask(first_img, sam2_predictor, state, frame_idx, CONFIG["display_height"])
+            mask = manual_cap_mask(img, sam2, state, 0, CONFIG["display_height"])
 
-        cap_mask_exp = _expand_mask(cap_mask, expansion=CONFIG["cap_mask_expansion"])
-        disp, _ = resize_for_display(first_img, CONFIG["display_height"])
-        preview = _draw_mask_overlay(disp, cap_mask_exp, alpha=CONFIG["cap_confirm_alpha"])
-        
-        instructions = f"CAP MASK (mode={mode}) | y=accept | r=redo | m=manual | a=auto | q=quit"
-        tip = "Tip: For better detection, press 'm' and click the center of the cap."
+        mask_exp = expand_mask(mask, CONFIG["cap_mask_expansion"])
+        disp, _ = resize_for_display(img, CONFIG["display_height"])
+        preview = draw_mask_overlay(disp, mask_exp, CONFIG["cap_confirm_alpha"])
 
         win = "Confirm Cap Mask"
         cv2.namedWindow(win)
         while True:
             show = preview.copy()
             cv2.rectangle(show, (0, 0), (show.shape[1], 60), (0, 0, 0), -1)
-            cv2.putText(show, instructions, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
-            cv2.putText(show, tip, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1)
-            
+            cv2.putText(show, f"Mode={mode} | y=OK | r=redo | m=manual | a=auto | q=quit", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(show, "Tip: Press 'm' and click center of cap for best results", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1)
             cv2.imshow(win, show)
+
             k = cv2.waitKey(1) & 0xFF
             if k == ord('y'):
-                sam2_predictor.add_new_mask(state, frame_idx=frame_idx, obj_id=999, mask=cap_mask_exp.astype(np.uint8))
+                with torch.inference_mode():
+                    sam2.add_new_mask(state, frame_idx=0, obj_id=999, mask=mask_exp.astype(np.uint8))
                 cv2.destroyWindow(win)
-                return cap_mask_exp
+                return mask_exp
             if k == ord('r'): break
             if k == ord('m'): mode = "manual"; break
             if k == ord('a'): mode = "auto"; break
             if k == ord('q'): sys.exit(0)
         cv2.destroyWindow(win)
 
-def precompute_cap_masks(sam2_predictor, state, frame_names, device_str):
-    """
-    Propagates the Cap Mask (ID 999) through all frames ahead of time.
-    This lets us instantly check if a click is valid or invalid later.
-    """
-    print("Pre-tracking cap mask for all frames...")
-    cap_masks = {}
-    
-    # --- Autocast Context ---
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BFLOAT16 else nullcontext()
-    
-    with ctx, torch.inference_mode():
-        for f_idx, ids, logits in tqdm(sam2_predictor.propagate_in_video(state), total=len(frame_names)):
-            if 999 in ids:
-                idx = list(ids).index(999)
-                mask = (logits[idx] > 0.0).cpu().numpy().squeeze()
-                cap_masks[f_idx] = _expand_mask(mask, CONFIG["cap_mask_expansion"])
-            else:
-                cap_masks[f_idx] = None 
-    return cap_masks
 
-# ==================================================================================================
-# 3. MAIN PIPELINE LOGIC
-# ==================================================================================================
+def precompute_cap_masks(sam2, state, frames):
+    """Pre-track cap mask"""
+    print("Pre-tracking cap mask...")
+    masks = {}
+    with torch.inference_mode():
+        for fidx, ids, logits in tqdm(sam2.propagate_in_video(state), total=len(frames)):
+            if 999 in ids:
+                m = (logits[list(ids).index(999)] > 0).cpu().numpy().squeeze()
+                masks[fidx] = expand_mask(m, CONFIG["cap_mask_expansion"])
+            else:
+                masks[fidx] = None
+    return masks
+
+
+
+# STEP 6: MAIN
+
 
 def main():
-    # 1. Load Models (YOLOv11s + SAM2 Small)
-    yolo, sam2_predictor = initialize_models()
-    
-    # 2. Extract Frames
-    frame_names, (crop_off_x, crop_off_y) = extract_frames_with_crop()
-    if not frame_names: return
+    print("\n" + "=" * 70)
+    print("EEG ELECTRODE REGISTRATION PIPELINE")
+    print("(with SAM2 dtype patch v2)")
+    print("=" * 70 + "\n")
 
-    # 3. Init State for Main Tracking
-    state = sam2_predictor.init_state(video_path=FRAME_DIR)
-    
-    # 4. Create Initial Cap Mask
-    first_img = cv2.imread(os.path.join(FRAME_DIR, frame_names[0]))
-    valid_mask = create_cap_mask_all_features(first_img, sam2_predictor, state, 0, SAM2_CONFIG, SAM2_CHECKPOINT, DEVICE_STR, yolo)
-    
-    # 5. Pre-compute Cap Masks (Optimization)
-    print("Initializing temporary SAM2 state for cap tracking...")
-    cap_state = sam2_predictor.init_state(video_path=FRAME_DIR)
-    sam2_predictor.add_new_mask(cap_state, frame_idx=0, obj_id=999, mask=valid_mask.astype(np.uint8))
-    cap_masks_cache = precompute_cap_masks(sam2_predictor, cap_state, frame_names, DEVICE_STR)
-    
-    # Free memory from temporary state
+    # 1. Models
+    yolo, sam2 = initialize_models()
+
+    # 2. Frames
+    frames, (off_x, off_y) = extract_frames()
+    if not frames: return
+
+    # 3. Init state
+    print("\nInitializing SAM2 state...")
+    with torch.inference_mode():
+        state = sam2.init_state(video_path=FRAME_DIR)
+
+    # 4. Cap mask
+    first_img = cv2.imread(os.path.join(FRAME_DIR, frames[0]))
+    cap_mask = create_cap_mask(first_img, sam2, state, yolo)
+
+    # 5. Pre-compute cap masks
+    print("\nPre-computing cap masks...")
+    with torch.inference_mode():
+        cap_state = sam2.init_state(video_path=FRAME_DIR)
+        sam2.add_new_mask(cap_state, frame_idx=0, obj_id=999, mask=cap_mask.astype(np.uint8))
+    cap_cache = precompute_cap_masks(sam2, cap_state, frames)
     del cap_state
-    if DEVICE_STR == "cuda": torch.cuda.empty_cache()
     gc.collect()
+    if DEVICE_STR == "cuda": torch.cuda.empty_cache()
 
-    # 6. Interactive Labeling Phase
-    disp0, DISPLAY_SCALE = resize_for_display(first_img, CONFIG["display_height"])
-    global_points = []
-    current_id, current_idx = 0, 0
-    flash_points = []
-    
-    def on_click(event, x, y, flags, param):
+    # 6. Interactive labeling
+    _, SCALE = resize_for_display(first_img, CONFIG["display_height"])
+    points, current_id, idx_box, flashes = [], 0, [0], []
+
+    def click(e, x, y, f, p):
         nonlocal current_id
-        if event == cv2.EVENT_LBUTTONDOWN:
-            real_x = int(x / DISPLAY_SCALE)
-            real_y = int(y / DISPLAY_SCALE)
-            
-            # --- Check: Is click inside the Cap Mask? ---
-            current_cap_mask = cap_masks_cache.get(current_idx)
-            is_valid = True
-            if current_id >= 3: # Enforce for electrodes (skip landmarks 0-2)
-                if current_cap_mask is None: is_valid = False
-                else:
-                    h, w = current_cap_mask.shape
-                    if not (0 <= real_y < h and 0 <= real_x < w and current_cap_mask[real_y, real_x]):
-                        is_valid = False
-            
-            if not is_valid:
-                print(">>> CLICK REJECTED: Outside Cap Mask")
-                return
+        if e != cv2.EVENT_LBUTTONDOWN: return
+        cidx = idx_box[0]
+        rx, ry = int(x/SCALE), int(y/SCALE)
 
-            # Add electrode point to SAM2 State
-            sam2_predictor.add_new_points_or_box(state, frame_idx=current_idx, obj_id=current_id, points=[np.array((real_x, real_y), dtype=np.float32)], labels=[1])
-            global_points.append((real_x, real_y))
-            flash_points.append((real_x, real_y, (0, 255, 0) if current_id < 3 else (0, 0, 255), time.time()))
-            current_id += 1
+        cap = cap_cache.get(cidx)
+        if current_id >= 3 and (cap is None or not (0 <= ry < cap.shape[0] and 0 <= rx < cap.shape[1] and cap[ry, rx])):
+            print(">>> Outside cap mask")
+            return
+
+        with torch.inference_mode():
+            sam2.add_new_points_or_box(state, frame_idx=cidx, obj_id=current_id,
+                                       points=[np.array((rx, ry), dtype=np.float32)], labels=[1])
+        points.append((rx, ry))
+        flashes.append((rx, ry, (0, 255, 0) if current_id < 3 else (0, 0, 255), time.time()))
+        current_id += 1
 
     cv2.namedWindow("Pipeline")
-    cv2.setMouseCallback("Pipeline", on_click)
+    cv2.setMouseCallback("Pipeline", click)
 
     print("\n--- Interactive Phase ---")
     while True:
-        img = cv2.imread(os.path.join(FRAME_DIR, frame_names[current_idx]))
+        cidx = idx_box[0]
+        img = cv2.imread(os.path.join(FRAME_DIR, frames[cidx]))
         if img is None: break
         disp, _ = resize_for_display(img, CONFIG["display_height"])
-        
-        # Visualize Cap Mask (Darken outside area)
-        current_cap_mask = cap_masks_cache.get(current_idx)
-        if current_cap_mask is not None:
-            mask_overlay = disp.copy()
-            resized_mask = cv2.resize(current_cap_mask.astype(np.uint8), (disp.shape[1], disp.shape[0]))
-            mask_overlay[resized_mask == 0] = mask_overlay[resized_mask == 0] // 2
-            disp = cv2.addWeighted(disp, 0.7, mask_overlay, 0.3, 0)
 
-        # Visualize Click Feedback
+        cap = cap_cache.get(cidx)
+        if cap is not None:
+            overlay = disp.copy()
+            rm = cv2.resize(cap.astype(np.uint8), (disp.shape[1], disp.shape[0]))
+            overlay[rm == 0] = overlay[rm == 0] // 2
+            disp = cv2.addWeighted(disp, 0.7, overlay, 0.3, 0)
+
         now = time.time()
-        flash_points[:] = [p for p in flash_points if now - p[3] < 1.0]
-        for (fx, fy, col, _) in flash_points:
-            cv2.circle(disp, (int(fx * DISPLAY_SCALE), int(fy * DISPLAY_SCALE)), 7, col, -1)
+        flashes[:] = [f for f in flashes if now - f[3] < CONFIG["flash_duration"]]
+        for fx, fy, col, _ in flashes:
+            cv2.circle(disp, (int(fx*SCALE), int(fy*SCALE)), 7, col, -1)
 
-        disp = draw_hud(disp, current_idx, len(frame_names), current_id)
+        disp = draw_hud(disp, cidx, len(frames), current_id)
         cv2.imshow("Pipeline", disp)
-        
-        key = cv2.waitKey(1) & 0xFF
-        # Navigation
-        if key == ord('s'): current_idx = min(current_idx + 15, len(frame_names)-1)
-        elif key == ord('a'): current_idx = max(current_idx - 15, 0)
-        elif key == ord('q'): sys.exit(0)
-        
-        # YOLO Detection
-        elif key == ord('d'):
-            if current_id < 3: print(">>> Click landmarks first!"); continue
-            print(f"YOLO frame {current_idx}...")
-            results = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
+
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('s'): idx_box[0] = min(cidx + 15, len(frames) - 1)
+        elif k == ord('a'): idx_box[0] = max(cidx - 15, 0)
+        elif k == ord('q'): sys.exit(0)
+        elif k == ord('d'):
+            if current_id < 3:
+                print(">>> Click landmarks first!")
+                continue
+            print(f"YOLO detecting frame {cidx}...")
+            res = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
             found = 0
-            if results and results[0].boxes is not None:
-                current_cap_mask = cap_masks_cache.get(current_idx)
-                for box in results[0].boxes.xyxy.cpu().numpy():
-                    cx, cy = (box[0] + box[2])/2.0, (box[1] + box[3])/2.0
-                    # Check Mask
-                    if current_cap_mask is not None:
-                        if not (0 <= int(cy) < current_cap_mask.shape[0] and 0 <= int(cx) < current_cap_mask.shape[1] and current_cap_mask[int(cy), int(cx)]):
-                            continue
-                    # Check Duplicate
-                    if is_global_duplicate((cx, cy), global_points, CONFIG["duplicate_radius"]): continue
-                    # Add
-                    sam2_predictor.add_new_points_or_box(state, frame_idx=current_idx, obj_id=current_id, box=box)
-                    global_points.append((cx, cy))
-                    flash_points.append((cx, cy, (0,0,255), time.time()))
-                    current_id += 1; found += 1
-            print(f"YOLO added {found} electrodes.")
-        elif key == 32: 
-            if current_id < 3: print(">>> Click landmarks first."); continue
-            else: break
+            if res and res[0].boxes is not None:
+                cap = cap_cache.get(cidx)
+                for box in res[0].boxes.xyxy.cpu().numpy():
+                    cx, cy = (box[0]+box[2])/2, (box[1]+box[3])/2
+                    if cap is not None and not (0 <= int(cy) < cap.shape[0] and 0 <= int(cx) < cap.shape[1] and cap[int(cy), int(cx)]):
+                        continue
+                    if is_duplicate((cx, cy), points, CONFIG["duplicate_radius"]):
+                        continue
+                    with torch.inference_mode():
+                        sam2.add_new_points_or_box(state, frame_idx=cidx, obj_id=current_id, box=box)
+                    points.append((cx, cy))
+                    flashes.append((cx, cy, (0, 0, 255), time.time()))
+                    current_id += 1
+                    found += 1
+            print(f"Added {found} electrodes")
+        elif k == 32:
+            if current_id < 3:
+                print(">>> Click landmarks first")
+                continue
+            break
     cv2.destroyAllWindows()
 
-    # 7. Final Tracking Phase
+    # 7. TRACKING
     print("\n--- SAM2 Tracking ---")
     tracking = {}
-    
-    # --- Autocast Context ---
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BFLOAT16 else nullcontext()
-    
-    with ctx, torch.inference_mode():
-        for f_idx, ids, logits in tqdm(sam2_predictor.propagate_in_video(state), total=len(frame_names)):
-            frame_dict = {}
-            for i, obj_id in enumerate(ids):
-                if obj_id == 999: continue # Ignore Cap Mask in output
-                mask = (logits[i] > 0.0).cpu().numpy().squeeze()
-                ys, xs = np.where(mask)
+    with torch.inference_mode():
+        for fidx, ids, logits in tqdm(sam2.propagate_in_video(state), total=len(frames)):
+            fd = {}
+            for i, oid in enumerate(ids):
+                if oid == 999: continue
+                m = (logits[i] > 0).cpu().numpy().squeeze()
+                ys, xs = np.where(m)
                 if len(xs) > 0:
-                    cx, cy = np.mean(xs) + crop_off_x, np.mean(ys) + crop_off_y
-                    frame_dict[int(obj_id)] = (float(cx), float(cy))
-            tracking[int(f_idx)] = frame_dict
+                    fd[int(oid)] = (float(np.mean(xs) + off_x), float(np.mean(ys) + off_y))
+            tracking[int(fidx)] = fd
 
+    # Save
+    print("\nSaving results...")
     with open(RAW_FILE, "wb") as f: pickle.dump(tracking, f)
 
-    # 8. Post-Processing: Smoothing
-    smoothed = {}
-    for f_idx, objs in tracking.items(): smoothed[f_idx] = dict(objs)
+    # Smooth
+    smoothed = {fidx: dict(objs) for fidx, objs in tracking.items()}
     traj = {}
-    for f_idx, objs in tracking.items():
-        for obj_id, (x, y) in objs.items():
-            traj.setdefault(obj_id, {"x": [], "y": [], "frames": []})
-            traj[obj_id]["frames"].append(f_idx)
-            traj[obj_id]["x"].append(x)
-            traj[obj_id]["y"].append(y)
-    
-    for obj_id, t in traj.items():
+    for fidx, objs in tracking.items():
+        for oid, (x, y) in objs.items():
+            traj.setdefault(oid, {"x": [], "y": [], "f": []})
+            traj[oid]["f"].append(fidx)
+            traj[oid]["x"].append(x)
+            traj[oid]["y"].append(y)
+
+    for oid, t in traj.items():
         if len(t["x"]) >= CONFIG["smooth_window"]:
             try:
                 sx = savgol_filter(t["x"], CONFIG["smooth_window"], CONFIG["poly_order"])
                 sy = savgol_filter(t["y"], CONFIG["smooth_window"], CONFIG["poly_order"])
-                for k, f_idx in enumerate(t["frames"]):
-                    smoothed[f_idx][obj_id] = (float(sx[k]), float(sy[k]))
+                for k, fidx in enumerate(t["f"]):
+                    smoothed[fidx][oid] = (float(sx[k]), float(sy[k]))
             except: pass
-    
+
     with open(SMOOTH_FILE, "wb") as f: pickle.dump(smoothed, f)
-    
-    # 9. Post-Processing: Ordering
-    ordered = order_electrodes_head_relative(smoothed)
+
+    ordered = order_electrodes(smoothed)
     if ordered:
         with open(ORDER_FILE, "w") as f: json.dump([e["id"] for e in ordered], f)
-        print(f"Saved order to {ORDER_FILE}")
-    print("Done.")
+
+    print("\n" + "=" * 70)
+    print("PIPELINE COMPLETE!")
+    print("=" * 70)
+    print(f"\nResults: {RAW_FILE}, {SMOOTH_FILE}, {ORDER_FILE}\n")
+
 
 if __name__ == "__main__":
     main()
