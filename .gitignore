@@ -223,6 +223,11 @@ temp_frames/
 *.mp4
 *.jpg
 results/
+!results/
+!results/electrode_order.json
+!results/tracking_data.pkl
+!results/tracking_smoothed.pkl
+
 
 *.mp4
 data/
