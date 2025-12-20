@@ -8,63 +8,84 @@ Electroencephalography (EEG) is a non-invasive technique that can measure the ne
 This Python-based toolbox offers a **user-friendly, easy-to-install solution** that simplifies EEG electrode registration using only a smartphone camera and computer vision. The method combines YOLOv11, a real-time object detection model, for electrode detection and Segment Anything 2 (SAM2), a foundation model for video segmentation and tracking, for robust electrode propagation across frames (Jocher et al., 2024; Ravi et al., 2024).
 
 ## Pipeline Overview
-The technical logic follows a 4-stage pipeline: **Data Prep** $\rightarrow$ **Masking** $\rightarrow$ **Labeling** $\rightarrow$ **Tracking**
+The technical logic follows a 3-stage pipeline: **Data Prep** $\rightarrow$ **2D Tracking & 3D Reconstruction** $\rightarrow$ **3D Registration** 
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> Init[Initialize Models: YOLO & SAM2]
+    Start([Start]) --> Init[Initialize Models: YOLO, SAM2, VGGT]
 
     %% --------------------
-    subgraph Data_Prep [1. Data Preparation]
+    %% SHARED PREP
+    %% --------------------
+    subgraph Data_Prep ["1. Data Preparation"]
         direction TB
         Init --> MultiFrameCrop[Interactive Multi-Frame Crop]
-        MultiFrameCrop --> ExtractFrames[Extract & Save Frames]
+        MultiFrameCrop --> ExtractFrames[Extract & Save All Frames]
     end
 
     %% --------------------
-    subgraph Masking_Phase [2. Cap Mask Generation]
-        direction TB
-        ExtractFrames --> LoadFirstFrame[Load First Frame]
-        LoadFirstFrame --> AutoMaskGen{Auto or Manual?}
-        AutoMaskGen -- Auto --> SAM2_Auto[SAM2 AutoMask + YOLO]
-        AutoMaskGen -- Manual --> Manual_Click[User Clicks Cap Center]
-        SAM2_Auto --> ExpandMask[Expand Mask +10%]
-        Manual_Click --> ExpandMask
-        ExpandMask --> Precompute[Cache Cap Mask for All Frames]
-    end
-
+    %% BRANCH 1: THE 2D PIPELINE (Your existing work)
     %% --------------------
-    subgraph Labeling_Phase [3. Interactive Labeling]
+    subgraph 2D_Pipeline ["2. 2D Tracking Pipeline"]
         direction TB
-        Precompute --> UserClickLandmarks[Click Landmarks: NAS, LPA, RPA]
-        UserClickLandmarks --> InteractiveLoop{User Action Loop}
-        InteractiveLoop -- Manual Click --> AddManual[Add Point to Main Window]
+        ExtractFrames -- "All Frames" --> AutoMaskGen{Auto Masking?}
         
-        InteractiveLoop -- Press 'D' --> RunYOLO[Run YOLO Detection]
-        RunYOLO --> ShowRefWindow[<B>Show Static Reference Window</B>]
-        ShowRefWindow --> Filter[Filter Duplicates & Outside Mask]
-        Filter --> AddYOLO[Add Points to State]
+        %% Masking
+        AutoMaskGen -- Auto --> SAM2_Auto[SAM2 AutoMask]
+        AutoMaskGen -- Manual --> Manual_Click[User Clicks Cap]
+        SAM2_Auto --> Precompute[Cache Masks]
+        Manual_Click --> Precompute
+
+        %% Labeling
+        Precompute --> UserClickLandmarks["Click Landmarks: NAS, LPA, RPA"]
+        UserClickLandmarks --> InteractiveLoop{Interactive Labeling Loop}
         
-        InteractiveLoop -- Nav 'A'/'S' --> MoveFrame[Change Frame]
-        MoveFrame -- Keep Window Open --> InteractiveLoop
+        InteractiveLoop -- "Press 'D'" --> RunYOLO[YOLO Detection]
+        RunYOLO --> InteractiveLoop
+        InteractiveLoop -- "Manual Click" --> AddPoint[Add Point]
+        AddPoint --> InteractiveLoop
+
+        %% Tracking
+        InteractiveLoop -- "Press Space" --> Tracking[SAM2 Propagation]
+        Tracking --> Ordering[Head-Relative Ordering]
+        Ordering --> Save2D["<B>Save 2D Tracks (JSON/PKL)</B>"]
     end
 
     %% --------------------
-    subgraph Processing_Phase [4. Tracking & Analysis]
+    %% BRANCH 2: THE 3D PIPELINE (New VGGT Script)
+    %% --------------------
+    subgraph 3D_Pipeline ["3. VGGT 3D Reconstruction"]
         direction TB
-        InteractiveLoop -- Press Space --> Tracking[SAM2 Propagation]
-        Tracking --> RawSave[Save Raw Data]
-        RawSave --> Ordering[Head-Relative Ordering]
-        Ordering --> FinalSave[Save JSON & PKL]
+        ExtractFrames -- "Select ~20-50 Frames" --> SmartSubsample[Smart Frame Subsampling]
+        SmartSubsample --> VGGT_Infer["VGGT Inference (Depth & Camera Poses)"]
+        VGGT_Infer --> Filters["Filter: Confidence, Outliers, Color"]
+        Filters --> Save3D["<B>Save 3D Scene (PLY/NPZ)</B>"]
     end
 
-    FinalSave --> End([End])
+    %% --------------------
+    %% MERGE: THE BRIDGE SCRIPT
+    %% --------------------
+    subgraph Bridge_Phase ["4. 3D Registration (Bridge Script)"]
+        direction TB
+        Save2D --> LoadData[Load 2D Tracks + 3D Scene]
+        Save3D --> LoadData
+        LoadData --> RayCast["Ray Casting / Back-Projection"]
+        RayCast --> FinalOutput["<B>Output Final 3D Electrode Coords</B>"]
+    end
+
+    FinalOutput --> End([End])
+
+    %% Styling for clarity
+    classDef output fill:#f96,stroke:#333,stroke-width:2px;
+    class Save2D,Save3D,FinalOutput output;
 ```
+
 ## Installation
 
 ### Prerequisites
 - Python 3.12
-- NVIDIA GPU with CUDA support is recommended for faster SAM2 tracking (CPU is supported but slower)
+- **NVIDIA GPU** with CUDA support is highly recommended.
+  - *Note:* The 2D pipeline (SAM2) and 3D pipeline (VGGT) work on CPU, but 3D reconstruction will be significantly slower.
 
 ### Setup
 
@@ -73,68 +94,102 @@ flowchart TD
 git clone https://github.com/your-username/video-eeg-electrode-registration.git
 cd video-eeg-electrode-registration
 ```
-2. Create and sync the environment using `uv`:
+2. Clone the VGGT submodule (Required for 3D reconstruction):
+```bash
+# Clone VGGT into the project root
+git clone [https://github.com/facebookresearch/vggt.git](https://github.com/facebookresearch/vggt.git)
+```
+3.Create and sync the environment using `uv`:
 ```bash
 uv venv
+# Install standard dependencies
 uv pip install -r requirements.txt
+
+# Install 3D visualization and analysis tools
+uv pip install viser scikit-learn
 ```
 
-## User Guide (Interactive Pipeline v3)
+## User Guide 
+
+The pipeline is split into two parallel phases that merge at the end.
+
+---
+
+## Phase 1: 2D Tracking (Coordinate Extraction)
+
+### Run the tracking script
+```bash
+uv run python scripts/Script1_yolo_SAM2.py
+```
 
 ### 1. Cropping (Head Selection)
 **Goal:** Define the Region of Interest (ROI) to help the AI focus.
 
 **Action:** A "Crop Preview" window will open.
 * Use **A** (Back) and **S** (Forward) to scrub through the video.
-* Draw **ONE box** that is large enough to contain the head in every frame (even when the participant turns).
+* Draw **ONE box** that is large enough to contain the head in every frame (including head turns).
 * Press **SPACE** to confirm.
 
 ### 2. Cap Masking (Defining the Safe Zone)
-**Goal:** Prevent the AI from detecting background noise (e.g., buttons on a shirt).
-
-**Action:** A "Confirm Cap Mask" window appears with a yellow overlay.
-* **Recommended:** Press **m** for Manual Mode, then click the **center** of the EEG cap.
-* If the yellow mask covers the cap correctly, press **y** to accept.
+**Goal:**
+Prevent the AI from detecting background objects (buttons, walls, etc.).
+**Action:**
+Click the center of the EEG cap.
+If the yellow mask correctly covers the cap, press `y` to accept.
 
 ### 3. Landmark Selection (Critical)
 **Goal:** Define the head coordinate system.
-
-**Action:** In the main "Pipeline" window, click these 3 points in exact order:
-1. **Nose** (Nasion)
-2. **Left Ear** (LPA)
-3. **Right Ear** (RPA)
+**Action:**
+Click the following three landmarks **in exact order**:
+1) Nasion (NAS)
+2) Left Preauricular Point (LPA)
+3) Right Preauricular Point (RPA)
 
 ### 4. Electrode Detection (The "Reference Map" Strategy)
 **Goal:** Label all electrodes exactly once without creating duplicates.
 
-**Step A: The Main Sweep**
-1. Move to a frame (using **A** / **S**) where the **most** electrodes are visible (usually the front/top view).
-2. Press **D** to run YOLO Auto-Detection. (Do this only **ONCE**).
-3. **A new "Reference Map" window will pop up.**
-   * This window is a **static screenshot** of your detections. It will **not move**.
-   * Use this window as a "cheat sheet" to remember which electrodes are already caught (marked in yellow boxes).
+**Step A: Automatic Detection**
+- Navigate to a frame where many electrodes are visible.
+- Press `D` to run YOLO detection.
+- A static Reference Map window will appear.
+- Use this as a cheat sheet to see which electrodes are already registered.
+**Step B: Manual Completion**
+-Use A / S to rotate through side views.
+-If you see an electrode in the main window not shown in the Reference Map, click it to add it.
+! Important:
+Do not **re**-click electrodes that already appear in the Reference Map.
 
-**Step B: Manual Fill**
-1. Look at the **Main "Pipeline" Window**.
-2. Use **A** / **S** to rotate the head to side/back views.
-3. Compare with your **Reference Map**:
-   * If you see an electrode in the Main Window that is **NOT** marked in the Reference Map, **Click it** to add it manually.
-   * **Warning:** Do NOT re-click electrodes that are already marked in the Reference Map, even if they moved. The tracker already knows where they are.
+### 5. Track & Save
+- Press SPACE to finish labeling.
+- Wait for the progress bar to reach 100%.
+- The system will automatically track all electrodes across the video and save the results.
 
-### 5. Finish & Track
-* Once all unique electrodes have been identified (either by YOLO or your clicks), press **SPACE**.
-* The script will close the GUI and run the SAM2 tracker.
-* Wait for the progress bar to reach 100%.
+## Phase 2: 3D Reconstruction (VGGT)
 
+Run the reconstruction script
+```bash
+uv run python scripts/Script2_vggt.py
+
+```
+### Interactive Visualization
+Once processing is complete, a 3D viewer opens at:
+
+```bash
+http://localhost:8080
+
+```
 ## Outputs
 
-The results are saved in the `results/` folder:
+Results are saved in the `results/` directory:
 
-| File | Format | Description |
-| :--- | :--- | :--- |
-| **`tracking_results.pkl`** | Pickle | **Raw tracking data.** Contains the exact (X, Y) pixel coordinates for every electrode in every frame. (No smoothing applied). |
-| `electrode_order.json` | JSON | A sorted list of electrode IDs ordered spatially (Front-to-Back, Left-to-Right). |
-| `crop_info.json` | JSON | Metadata about the crop coordinates (`x, y, w, h`) used for this session. Needed for 3D reconstruction. |
+| File | Type | Description |
+|------|------|-------------|
+| `tracking_results.pkl` | 2D Data | Raw electrode tracking data (X, Y) for every electrode in every frame. |
+| `electrode_order.json` | Metadata | Spatially ordered electrode IDs (front-to-back). |
+| `crop_info.json` | Metadata | Crop coordinates (`x`, `y`, `w`, `h`) used to align 2D and 3D data. |
+| `head_reconstruction.ply` | 3D Model | Point cloud of the reconstructed head (viewable in MeshLab or other 3D software). |
+| `head_reconstruction.npz` | 3D Data | Scene data containing points, colors, and camera poses. |
+
 
 ## References
 
