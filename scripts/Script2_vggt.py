@@ -1,6 +1,6 @@
 """
 VGGT 3D Head Reconstruction (Step 2)
-====================================
+
 Requirements:
 1. You MUST run Script 1 first to extract frames and crop info.
 2. This script uses those exact frames to ensure 3D alignment.
@@ -119,7 +119,7 @@ def load_script1_data():
 
 
 def preprocess_frames(frame_paths):
-    print(f"\n--- 2. Preprocessing for VGGT ({TARGET_SIZE}x{TARGET_SIZE}) ---")
+    print(f" 2. Preprocessing for VGGT ({TARGET_SIZE}x{TARGET_SIZE})")
     
     if os.path.exists(TEMP_VGGT_DIR): shutil.rmtree(TEMP_VGGT_DIR)
     os.makedirs(TEMP_VGGT_DIR, exist_ok=True)

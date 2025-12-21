@@ -168,9 +168,9 @@ CONFIG = {
 }
 
 
-# ==============================================================================
+
 # STEP 3: MODEL INITIALIZATION
-# ==============================================================================
+
 
 def initialize_models():
     print(f"\nLoading YOLO from {YOLO_WEIGHTS}...")
@@ -181,7 +181,7 @@ def initialize_models():
     sam2_predictor = build_sam2_video_predictor(SAM2_CONFIG, SAM2_CHECKPOINT, device=DEVICE_STR)
     sam2_predictor = sam2_predictor.float()
     sam2_predictor.eval()
-    print("✓ Models initialized\n")
+    print("Models initialized\n")
     return yolo, sam2_predictor
 
 def build_sam2_float32():
@@ -191,9 +191,9 @@ def build_sam2_float32():
     return model
 
 
-# ==============================================================================
+
 # STEP 4: HELPER FUNCTIONS
-# ==============================================================================
+
 
 def resize_for_display(img, target_height):
     h, w = img.shape[:2]
@@ -356,9 +356,7 @@ def is_duplicate(pt, existing, radius):
     return any(np.linalg.norm(np.array(pt) - np.array(p)) < radius for p in existing[NUM_LANDMARKS:])
 
 
-# ==============================================================================
 # STEP 5: CAP MASK FUNCTIONS
-# ==============================================================================
 
 def expand_mask(mask, expansion=1.10):
     if expansion <= 1.0: return mask.astype(bool)
@@ -460,11 +458,7 @@ def precompute_cap_masks(sam2, state, frames):
     return masks
 
 
-# ==============================================================================
 # STEP 6: FRAME ALIGNMENT & COORDINATE AVERAGING
-# ==============================================================================
-
-
 
 
 # INION ESTIMATION (2D)
@@ -605,7 +599,7 @@ def align_and_average_positions(tracking_data, min_landmarks=3):
         - aligned_positions: {electrode_id: (x, y)} averaged head-centered coordinates
         - stats: alignment statistics
     """
-    print("\n--- Frame Alignment & Averaging ---")
+    print(" Frame Alignment & Averaging ")
     
     # Collect all positions per electrode in head coordinates
     electrode_positions = {}  # {electrode_id: [(x, y), ...]}
@@ -733,9 +727,9 @@ def order_electrodes(positions):
     return [e["id"] for e in sorted_electrodes]
 
 
-# ==============================================================================
+
 # STEP 7: MAIN PIPELINE
-# ==============================================================================
+
 
 def main():
     print("\n" + "=" * 70)
@@ -912,14 +906,14 @@ def main():
                 m = (logits[i] > 0).cpu().numpy().squeeze()
                 ys, xs = np.where(m)
                 if len(xs) > 0:
-                    fd[int(oid)] = (float(np.mean(xs) + off_x), float(np.mean(ys) + off_y))
+                    fd[int(oid)] = (float(np.mean(xs)), float(np.mean(ys))) 
             tracking[int(fidx)] = fd
 
     # 8. Save raw tracking
     print("\nSaving raw tracking results...")
     with open(RAW_FILE, "wb") as f:
         pickle.dump(tracking, f)
-    print(f"✓ Saved: {RAW_FILE}")
+    print(f" Saved: {RAW_FILE}")
 
     # 9. Frame alignment and averaging
     aligned_positions, stats = align_and_average_positions(tracking)
@@ -932,7 +926,7 @@ def main():
     if ordered:
         with open(ORDER_FILE, "w") as f:
             json.dump(ordered, f)
-        print(f"✓ Saved electrode order: {ORDER_FILE}")
+        print(f" Saved electrode order: {ORDER_FILE}")
 
     # Summary
     print("\n" + "=" * 70)
