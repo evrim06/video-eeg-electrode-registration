@@ -94,29 +94,28 @@ flowchart TD
         MatchFrames["1. Match Frames<br>(Script1 idx ↔ VGGT idx)"]
         TransformCoords["2. Transform Coordinates<br>(Original → VGGT 518px space)"]
         Unproject["3. Unproject to 3D<br>(2D pixel + Depth → 3D point)"]
-        SnapSurface["4. Snap to Surface<br>(KD-tree nearest point)"]
-        RobustAvg["5. Robust Averaging<br>(Multi-view + outlier removal)"]
-        EstimateInion["6. Estimate INION<br>(from NAS, LPA, RPA geometry)"]
-        HeadAlign["7. Head Coordinate Alignment<br>(Origin=ear center, Scale=150mm)"]
+        RobustAvg["4. Robust Averaging<br>(Multi-view + outlier removal)"]
+        EstimateInion["5. Estimate INION<br>(from NAS, LPA, RPA geometry)"]
+        Measure["6. User Measurement<br>(Calipers/Tape/Circumference)"]
+        HeadAlign["7. Head Alignment & Scaling<br>(Scale to Real Millimeters)"]
         
         MatchFrames --> TransformCoords
         TransformCoords --> Unproject
-        Unproject --> SnapSurface
-        SnapSurface --> RobustAvg
+        Unproject --> RobustAvg
         RobustAvg --> EstimateInion
-        EstimateInion --> HeadAlign
+        EstimateInion --> Measure
+        Measure --> HeadAlign
     end
 
     %% Script 3 Data Flow
     TrackPkl --> MatchFrames
     CropInfo --> TransformCoords
     ReconNpz --> Unproject
-    ReconNpz --> SnapSurface
     
     %% Final Outputs
     HeadAlign ==>|"FINAL OUTPUT"| FinalJson[("electrodes_3d.json")]
     HeadAlign -.->|"3D Visualization"| FinalPly["electrodes_3d.ply"]
-    HeadAlign -.->|"Debug Image"| FinalPng["electrodes_3d_visualization.png"]
+        
 ```
 ## Installation
 
@@ -197,8 +196,16 @@ This pipeline is divided into three steps. You must run them in order.
 ### **Step 3: The Bridge (Fusion)**
 **Command:** `python scripts/run_bridge.py`
 
-* **Goal:** Combine 2D tracking data with 3D depth to calculate final coordinates.
-* **Action:** The script runs automatically. It matches frames, unprojects 2D pixels to 3D, removes outliers, and aligns the coordinates to the head landmarks.
+* **Goal:** Combine 2D tracking data with 3D depth and scale to real-world millimeters.
+* **Action:** The script will pause and ask for a **Head Measurement** to scale the model correctly. You will see these 4 options:
+
+    1.  **Direct Ear-to-Ear (Caliper):** Measure the straight-line distance between the tragus of each ear.
+    2.  **Tape Over Head (Arc):** Measure from Left Ear $\to$ Top of Head $\to$ Right Ear. (The script automatically converts this arc to a straight line).
+    3.  **Head Circumference:** Measure the circle around the head just above the eyebrows.
+    4.  **Skip (Default):** Use a standard adult average (150mm).
+
+* **Input:** Type the number of your choice (e.g., `2`) and then the value in millimeters (e.g., `360`).
+* **Result:** `electrodes_3d.json` (Real-world mm coordinates).
 
 ---
 
