@@ -5,7 +5,19 @@ Electroencephalography (EEG) is a non-invasive technique that can measure the ne
 
 ## Why This Pipeline?
 
-This Python-based toolbox offers a **user-friendly, easy-to-install solution** that simplifies EEG electrode registration using only a smartphone camera and computer vision. The method combines YOLOv11, a real-time object detection model, for electrode detection and Segment Anything 2 (SAM2), a foundation model for video segmentation and tracking, for robust electrode propagation across frames (Jocher et al., 2024; Ravi et al., 2024).
+This pipeline provides an easy-to-use and mostly automated way to estimate **3D EEG electrode positions** using only a short video recording (e.g., from a smartphone). It is designed to reduce manual work and avoid the need for expensive or specialized hardware.
+
+The approach combines two main steps:
+
+1. **Reliable 2D Electrode Tracking**  
+   EEG electrodes are first detected and tracked in the video using modern AI models (**YOLOv11** and **SAM2**). This produces stable 2D electrode positions across the video frames.
+
+2. **Subject-Specific 3D Head Reconstruction**  
+   The pipeline then builds a 3D model of the participant’s head directly from the video using **VGGT**. Unlike generic head templates, this model reflects the individual head shape of the recorded subject.
+
+By mapping the tracked 2D electrode positions onto the reconstructed 3D head surface, the pipeline estimates the 3D locations of EEG electrodes without requiring depth cameras, motion capture systems, or 3D scanners.
+
+
 
 ## Pipeline Overview
 The technical logic follows a 3-stage pipeline: **Data Prep** $\rightarrow$ **2D Tracking & 3D Reconstruction** $\rightarrow$ **3D Registration** 
