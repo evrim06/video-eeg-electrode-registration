@@ -24,10 +24,7 @@ The pipeline consists of **three main computational stages**:
 
 3. **2D-to-3D Projection and Head Coordinate Alignment (Script 3)**  
    The tracked 2D electrode positions are projected onto the reconstructed 3D head surface, snapped to the scalp, and transformed into a standardized head coordinate system with metric units (mm).
-.
 
-
-## Pipeline Overview
 ## Pipeline Workflow
 
 The pipeline is organized into three sequential scripts that transform a short video
@@ -36,76 +33,90 @@ into head-aligned 3D EEG electrode coordinates.
 ```mermaid
 flowchart TD
     %% Global Inputs
-    Video[("Video Input .mp4")]
+    Video[("Video Input<br>.mp4")]
 
     %% ==========================================
     %% SCRIPT 1: TRACKING
     %% ==========================================
-    subgraph Script1 [Script 1: Detection & Tracking]
+    subgraph Script1 ["Script 1: Detection & Tracking"]
         direction TB
-        Crop["Interactive Crop"]
-        Extract["Extract Frames"]
-        Mask["Cap Masking\n(SAM2 + User)"]
-        Landmarks["User Clicks Landmarks\n(NAS, LPA, RPA, INION)"]
-        Detect["Electrode Detection\n(YOLOv11)"]
-        Track["Video Tracking\n(SAM2)"]
+        Crop["1. Interactive Crop<br>(Define ROI)"]
+        Extract["2. Extract Frames<br>(every Nth frame)"]
+        Mask["3. Cap Masking<br>(SAM2 + User click)"]
+        Landmarks["4. User Clicks 3 Landmarks<br>(NAS, LPA, RPA)"]
+        Detect["5. Electrode Detection<br>(YOLOv11 + Manual)"]
+        Track["6. Video Tracking<br>(SAM2 propagation)"]
+        Align["7. Frame Alignment<br>(Head-centered coords)"]
+        Average["8. Multi-frame Averaging<br>(Outlier removal)"]
         
         Crop --> Extract
         Extract --> Mask
         Mask --> Landmarks
         Landmarks --> Detect
         Detect --> Track
+        Track --> Align
+        Align --> Average
     end
 
-    %% Data Flow from Script 1
+    %% Script 1 Outputs
     Video --> Crop
-    Extract -.->|Saved Frames| FramesDir["./frames/ folder"]
-    Crop -.->|Crop Metadata| CropData["crop_info.json"]
-    Track -->|"Raw 2D Coords"| TrackData["tracking_results.pkl"]
+    Extract -.->|"Saved Frames"| FramesDir[("./frames/")]
+    Crop -.->|"Crop Metadata"| CropInfo["crop_info.json"]
+    Track -.->|"Raw 2D Coords"| TrackPkl["tracking_results.pkl"]
+    Average -.->|"Aligned 2D Coords"| AlignedJson["aligned_positions.json"]
 
     %% ==========================================
     %% SCRIPT 2: RECONSTRUCTION
     %% ==========================================
-    subgraph Script2 [Script 2: 3D Reconstruction]
+    subgraph Script2 ["Script 2: 3D Reconstruction"]
         direction TB
-        Load["Load Frames from Script 1"]
-        Resize["Resize & Pad to 518px"]
-        VGGT["VGGT AI Model\n(Depth & Camera Pose)"]
-        Map["Save Frame Mapping"]
+        LoadFrames["1. Load Frames<br>(from Script 1)"]
+        SelectFrames["2. Select Subset<br>(evenly spaced)"]
+        Resize["3. Resize & Pad<br>(to 518×518)"]
+        VGGTModel["4. VGGT Model<br>(Depth + Camera Poses)"]
+        SaveMapping["5. Save Frame Mapping<br>(VGGT idx → Script1 idx)"]
         
-        Load --> Resize
-        Resize --> VGGT
-        VGGT --> Map
+        LoadFrames --> SelectFrames
+        SelectFrames --> Resize
+        Resize --> VGGTModel
+        VGGTModel --> SaveMapping
     end
 
-    %% Data Flow to Script 2
-    FramesDir --> Load
+    %% Script 2 Data Flow
+    FramesDir --> LoadFrames
+    SaveMapping -.->|"3D Data + Mapping"| ReconNpz["reconstruction.npz"]
 
     %% ==========================================
     %% SCRIPT 3: BRIDGE
     %% ==========================================
-    subgraph Script3 [Script 3: The Bridge]
+    subgraph Script3 ["Script 3: The Bridge"]
         direction TB
-        Match["Match Frames\n(Using Explicit Mapping)"]
-        Transform["Transform 2D Coords\n(Crop Space -> VGGT Space)"]
-        Unproject["Unproject to 3D\n(Pixel + Depth -> X,Y,Z)"]
-        Avg["Robust 3D Averaging\n(Remove Outliers)"]
-        Align["Head Alignment\n(Using Landmarks)"]
+        MatchFrames["1. Match Frames<br>(Script1 idx ↔ VGGT idx)"]
+        TransformCoords["2. Transform Coordinates<br>(Original → VGGT 518px space)"]
+        Unproject["3. Unproject to 3D<br>(2D pixel + Depth → 3D point)"]
+        SnapSurface["4. Snap to Surface<br>(KD-tree nearest point)"]
+        RobustAvg["5. Robust Averaging<br>(Multi-view + outlier removal)"]
+        EstimateInion["6. Estimate INION<br>(from NAS, LPA, RPA geometry)"]
+        HeadAlign["7. Head Coordinate Alignment<br>(Origin=ear center, Scale=150mm)"]
         
-        Match --> Transform
-        Transform --> Unproject
-        Unproject --> Avg
-        Avg --> Align
+        MatchFrames --> TransformCoords
+        TransformCoords --> Unproject
+        Unproject --> SnapSurface
+        SnapSurface --> RobustAvg
+        RobustAvg --> EstimateInion
+        EstimateInion --> HeadAlign
     end
 
-    %% Data Flow to Script 3
-    TrackData --> Match
-    VGGT -.->|"Depth & Intrinsics"| ReconData["reconstruction.npz"]
-    ReconData --> Unproject
-    CropData --> Transform
+    %% Script 3 Data Flow
+    TrackPkl --> MatchFrames
+    CropInfo --> TransformCoords
+    ReconNpz --> Unproject
+    ReconNpz --> SnapSurface
     
-    %% Final Output
-    Align --> FinalOutput[("Final Output\nelectrodes_3d.json")]
+    %% Final Outputs
+    HeadAlign ==>|"FINAL OUTPUT"| FinalJson[("electrodes_3d.json")]
+    HeadAlign -.->|"3D Visualization"| FinalPly["electrodes_3d.ply"]
+    HeadAlign -.->|"Debug Image"| FinalPng["electrodes_3d_visualization.png"]
 ```
 ## Installation
 
@@ -153,11 +164,12 @@ This pipeline is divided into three steps. You must run them in order.
 
 #### **3. Landmark Selection (Critical)**
 * **Goal:** Define the head coordinate system for alignment.
-* **Action:** In the main "Pipeline" window, click these **4 points** in exact order:
-    1.  **Nose (NAS)**
-    2.  **Left Ear (LPA)**
-    3.  **Right Ear (RPA)**
-    4.  **Inion (Back of Head)**
+* **Action:** In the main "Pipeline" window, click these **3 points** in exact order:
+    1.  **NAS (Nasion)** - Bridge of nose, between eyebrows
+    2.  **LPA (Left Pre-Auricular)** - Left ear tragus point
+    3.  **RPA (Right Pre-Auricular)** - Right ear tragus point
+
+> **Note:** INION (back of head) is estimated automatically using the geometric relationship with the other landmarks.
 
 #### **4. Electrode Detection (The "Sweep & Fill" Strategy)**
 * **Goal:** Label all electrodes exactly once.
