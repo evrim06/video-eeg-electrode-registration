@@ -146,7 +146,7 @@ uv pip install -r requirements.txt
 This pipeline is divided into three steps. You must run them in order.
 
 ### **Step 1: Detection & Tracking**
-**Command:** `python scripts/pipeline_step1_tracking.py`
+**Command:** `python scripts/Script1_yolo_SAM2.py`
 
 #### **1. Cropping (Head Selection)**
 * **Goal:** Define the Region of Interest (ROI) to help the AI focus.
@@ -156,12 +156,16 @@ This pipeline is divided into three steps. You must run them in order.
     * Press `SPACE` to confirm.
 
 #### **2. Cap Masking (Defining the Safe Zone)**
+**Command:** `python scripts/Script2_vggt.py`
+
 * **Goal:** Prevent the AI from detecting background noise (e.g., buttons on a shirt).
 * **Action:** A "Confirm Cap Mask" window appears with a yellow overlay.
     * **Recommended:** Press `m` for Manual Mode, then click the **center** of the EEG cap.
     * If the yellow mask covers the cap correctly, press `y` to accept.
 
 #### **3. Landmark Selection (Critical)**
+**Command:** `python scripts/Script3_bridge.py`
+
 * **Goal:** Define the head coordinate system for alignment.
 * **Action:** In the main "Pipeline" window, click these **3 points** in exact order:
     1.  **NAS (Nasion)** - Bridge of nose, between eyebrows
@@ -235,7 +239,7 @@ The results are saved in the `results/` folder:
 
 ```mermaid
 gantt
-    title Practical Project: EEG Electrode Registration Toolbox
+    title Practical Project: EEG Electrode Registration Pipeline
     dateFormat YYYY-MM-DD
     Familiarize with the topic:2025-10-15,2025-10-22
     Set up project environment(VSCode,UV,Github):2025-10-22,2025-10-29
