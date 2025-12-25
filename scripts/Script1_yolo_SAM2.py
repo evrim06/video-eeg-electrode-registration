@@ -170,7 +170,7 @@ CONFIG = {
 
 
 # STEP 3: MODEL INITIALIZATION
-
+# ==============================================================================
 
 def initialize_models():
     print(f"\nLoading YOLO from {YOLO_WEIGHTS}...")
@@ -874,7 +874,7 @@ def main():
                     current_id += 1
                     found += 1
             
-            print(f"✓ Added {found} new electrodes")
+            print(f" Added {found} new electrodes")
             ref_img = draw_reference_window(img, SCALE, points, new_detections)
             cv2.imshow("Reference Map", ref_img)
             
