@@ -30,7 +30,6 @@ The pipeline consists of **three main computational stages**:
 
 The pipeline is organized into three sequential scripts that transform a short video
 into head-aligned 3D EEG electrode coordinates.
-
 ```mermaid
 flowchart TD
     %% Global Inputs
@@ -44,7 +43,7 @@ flowchart TD
         Crop["1. Interactive Crop(Define ROI)"]
         Extract["2. Extract Frames(every Nth frame)"]
         Mask["3. Cap Masking(SAM2 + User click)"]
-        Landmarks["4. User Clicks 3 Landmarks(NAS, LPA, RPA)⚠️ USE DIFFERENT COLORS!"]
+        Landmarks["4. User Clicks 3 Landmarks(NAS, LPA, RPA) ! USE DIFFERENT COLORS!"]
         Detect["5. Electrode Detection(YOLOv11 + Manual)"]
         Track["6. Video Tracking(SAM2 propagation)"]
         
