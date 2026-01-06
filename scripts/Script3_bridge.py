@@ -1,6 +1,33 @@
 """
-VGGT-YOLO Bridge Script (Step 3) - FIXED
-========================================
+
+SCRIPT 3: 2D→3D PROJECTION WITH FRAME ALIGNMENT
+
+
+PURPOSE:
+    Project 2D tracking data to 3D with proper geometric calculations.
+    
+KEY FIX:
+    Does NOT require all 3 landmarks in a single frame!
+    Instead, we:
+    1. Collect landmark observations from ALL frames
+    2. Build a "virtual reference" from averaged landmarks
+    3. Align each frame using whatever landmarks ARE visible
+    
+INPUT:
+    - tracking_results.pkl (from Script 1)
+    - reconstruction.npz (from Script 2)
+    - crop_info.json (from Script 1)
+    
+OUTPUT:
+    - electrodes_3d.json: Final electrode positions in head coordinates (mm)
+    - electrodes_3d.ply: For 3D visualization
+
+COORDINATE SYSTEM:
+    Origin: Midpoint between LPA and RPA (ears)
+    X-axis: LPA → RPA (left to right)
+    Y-axis: INION → NAS (back to front)
+    Z-axis: Down → Up (perpendicular to X and Y)
+
 """
 
 import os
@@ -10,41 +37,68 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 
-# ==============================================================================
+
 # CONFIGURATION
-# ==============================================================================
+
+
+print("=" * 70)
+print("SCRIPT 3: 2D→3D PROJECTION WITH FRAME ALIGNMENT")
+print("=" * 70)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
+
 TRACKING_FILE = os.path.join(RESULTS_DIR, "tracking_results.pkl")
 RECON_FILE = os.path.join(RESULTS_DIR, "vggt_output", "reconstruction.npz")
-CROP_INFO_FILE = os.path.join(RESULTS_DIR, "crop_info.json")
+CROP_FILE = os.path.join(RESULTS_DIR, "crop_info.json")
+
 OUTPUT_JSON = os.path.join(RESULTS_DIR, "electrodes_3d.json")
 OUTPUT_PLY = os.path.join(RESULTS_DIR, "electrodes_3d.ply")
 
+# Landmark IDs (from Script 1)
 LANDMARK_NAS = 0
 LANDMARK_LPA = 1
 LANDMARK_RPA = 2
 NUM_LANDMARKS = 3
 
-ARC_TO_CHORD_RATIO = 0.92
-CIRCUMFERENCE_TO_EAR_RATIO = 0.26
+LANDMARK_NAMES = {
+    LANDMARK_NAS: "NAS",
+    LANDMARK_LPA: "LPA", 
+    LANDMARK_RPA: "RPA"
+}
+
+# Measurement conversion factors
+ARC_TO_CHORD = 0.92
+CIRCUMFERENCE_TO_EAR = 0.26
+
+# Alignment settings
+MIN_LANDMARKS_FOR_ALIGNMENT = 2  # Minimum landmarks needed per frame
+
+print("=" * 70)
+
 
 # ==============================================================================
-# MATH HELPERS
+# COORDINATE TRANSFORMATION
 # ==============================================================================
 
-def transform_coords_to_vggt_space(u, v, crop_w, crop_h, vggt_size=518):
+def script1_to_vggt_coords(u, v, crop_w, crop_h, vggt_size=518):
+    """Convert Script 1 pixel coordinates to VGGT coordinates."""
     scale = vggt_size / max(crop_w, crop_h)
-    new_w, new_h = int(crop_w * scale), int(crop_h * scale)
-    pad_w, pad_h = (vggt_size - new_w) // 2, (vggt_size - new_h) // 2
+    new_w = int(crop_w * scale)
+    new_h = int(crop_h * scale)
+    pad_w = (vggt_size - new_w) // 2
+    pad_h = (vggt_size - new_h) // 2
     return u * scale + pad_w, v * scale + pad_h
 
-def unproject_point(u, v, depth_map, intrinsic, extrinsic):
+
+def unproject_pixel(u, v, depth_map, intrinsic, extrinsic):
+    """Convert 2D pixel to 3D world point."""
     H, W = depth_map.shape
-    if not (0 <= u < W - 1 and 0 <= v < H - 1): 
+    
+    if not (0 <= u < W - 1 and 0 <= v < H - 1):
         return None
     
+    # Bilinear interpolation
     u0, v0 = int(u), int(v)
     u1, v1 = min(u0 + 1, W - 1), min(v0 + 1, H - 1)
     du, dv = u - u0, v - v0
@@ -53,10 +107,10 @@ def unproject_point(u, v, depth_map, intrinsic, extrinsic):
          depth_map[v0, u1] * du * (1 - dv) +
          depth_map[v1, u0] * (1 - du) * dv +
          depth_map[v1, u1] * du * dv)
-         
-    if z <= 0 or not np.isfinite(z): 
+    
+    if z <= 0 or not np.isfinite(z):
         return None
-
+    
     fx, fy = intrinsic[0, 0], intrinsic[1, 1]
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
     
@@ -66,295 +120,495 @@ def unproject_point(u, v, depth_map, intrinsic, extrinsic):
     P_cam = np.array([x_cam, y_cam, z, 1.0])
     return (np.linalg.inv(extrinsic) @ P_cam)[:3]
 
+
+# ==============================================================================
+# ROBUST AVERAGING
+# ==============================================================================
+
+def robust_average(points, outlier_std=2.0):
+    """
+    Compute robust average with outlier removal.
+    
+    Args:
+        points: list of 3D points
+        outlier_std: remove points > N std from median
+    
+    Returns:
+        averaged point, or None if insufficient data
+    """
+    if len(points) < 1:
+        return None
+    
+    pts = np.array(points)
+    
+    if len(pts) == 1:
+        return pts[0]
+    
+    # Use median as robust center
+    median = np.median(pts, axis=0)
+    
+    if len(pts) < 3:
+        return median
+    
+    # Remove outliers
+    dists = np.linalg.norm(pts - median, axis=1)
+    threshold = np.mean(dists) + outlier_std * np.std(dists)
+    mask = dists < threshold
+    
+    if np.sum(mask) < 1:
+        return median
+    
+    return np.mean(pts[mask], axis=0)
+
+
+# ==============================================================================
+# PROCRUSTES ALIGNMENT
+# ==============================================================================
+
+def compute_procrustes_transform(source_points, target_points):
+    """
+    Compute rigid transformation (rotation + translation + scale).
+    
+    Can work with 2 or 3 points (2 points = less accurate but still useful).
+    """
+    n_points = len(source_points)
+    
+    if n_points < 2:
+        return None
+    
+    source = np.array(source_points)
+    target = np.array(target_points)
+    
+    # Center both point sets
+    source_center = np.mean(source, axis=0)
+    target_center = np.mean(target, axis=0)
+    
+    source_centered = source - source_center
+    target_centered = target - target_center
+    
+    # Compute scale
+    source_scale = np.sqrt(np.sum(source_centered ** 2))
+    target_scale = np.sqrt(np.sum(target_centered ** 2))
+    
+    if source_scale < 1e-10 or target_scale < 1e-10:
+        return None
+    
+    # Normalize
+    source_normalized = source_centered / source_scale
+    target_normalized = target_centered / target_scale
+    
+    # Compute optimal rotation using SVD
+    H = target_normalized.T @ source_normalized
+    U, S, Vt = np.linalg.svd(H)
+    
+    R = U @ Vt
+    
+    # Handle reflection
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+    
+    scale = target_scale / source_scale
+    translation = target_center - scale * (R @ source_center)
+    
+    return {
+        "rotation": R,
+        "translation": translation,
+        "scale": scale
+    }
+
+
+def apply_procrustes(point, transform):
+    """Apply Procrustes transformation to a point."""
+    return transform["scale"] * (transform["rotation"] @ point) + transform["translation"]
+
+
+# ==============================================================================
+# 3D INION ESTIMATION
+# ==============================================================================
+
 def estimate_inion_3d(nas, lpa, rpa):
+    """
+    Estimate INION position in 3D from NAS, LPA, RPA.
+    Done in 3D to avoid perspective distortion.
+    """
     origin = (lpa + rpa) / 2.0
+    
     ear_axis = rpa - lpa
-    ear_axis /= np.linalg.norm(ear_axis)
+    ear_len = np.linalg.norm(ear_axis)
+    if ear_len < 1e-6:
+        return None
+    ear_axis = ear_axis / ear_len
     
     nas_vec = nas - origin
-    forward_dir = nas_vec - np.dot(nas_vec, ear_axis) * ear_axis
-    forward_len = np.linalg.norm(forward_dir)
+    forward = nas_vec - np.dot(nas_vec, ear_axis) * ear_axis
+    forward_len = np.linalg.norm(forward)
     
     if forward_len < 1e-6:
         return None
     
-    forward_dir /= forward_len
-    return origin - forward_dir * forward_len
+    forward = forward / forward_len
+    return origin - forward * forward_len
 
-def define_final_transform(points_avg, measured_mm):
-    NAS = points_avg[LANDMARK_NAS]
-    LPA = points_avg[LANDMARK_LPA]
-    RPA = points_avg[LANDMARK_RPA]
+
+# ==============================================================================
+# HEAD COORDINATE SYSTEM
+# ==============================================================================
+
+def build_head_transform(nas, lpa, rpa, measured_mm):
+    """Build transformation from world space to head-centered mm space."""
     
-    INION = estimate_inion_3d(NAS, LPA, RPA)
-    if INION is None:
-        print("  ❌ Could not estimate INION")
+    inion = estimate_inion_3d(nas, lpa, rpa)
+    if inion is None:
+        print("  ERROR: Could not estimate INION")
         return None
     
-    origin = (LPA + RPA) / 2.0
+    origin = (lpa + rpa) / 2.0
     
-    x_axis = RPA - LPA
-    raw_dist = np.linalg.norm(x_axis)
-    x_axis /= raw_dist
+    x_axis = rpa - lpa
+    raw_ear_dist = np.linalg.norm(x_axis)
+    x_axis = x_axis / raw_ear_dist
     
-    y_vec = NAS - INION
+    y_vec = nas - inion
     y_axis = y_vec - np.dot(y_vec, x_axis) * x_axis
-    y_axis /= np.linalg.norm(y_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
     
     z_axis = np.cross(x_axis, y_axis)
-    z_axis /= np.linalg.norm(z_axis)
+    z_axis = z_axis / np.linalg.norm(z_axis)
     
     R = np.array([x_axis, y_axis, z_axis])
-    scale = measured_mm / raw_dist
+    scale = measured_mm / raw_ear_dist
     
     return {
         "origin": origin,
         "rotation": R,
         "scale": scale,
-        "raw_ear_dist": raw_dist,
-        "est_inion": INION
+        "raw_ear_dist": raw_ear_dist,
+        "inion": inion
     }
 
-def apply_transform(p, t):
-    return t["rotation"] @ (p - t["origin"]) * t["scale"]
+
+def apply_head_transform(point, transform):
+    """Transform point to head coordinates (mm)."""
+    centered = point - transform["origin"]
+    rotated = transform["rotation"] @ centered
+    scaled = rotated * transform["scale"]
+    return scaled
+
 
 # ==============================================================================
-# MEASUREMENT
+# MEASUREMENT INPUT
 # ==============================================================================
 
 def get_measurement():
-    print("\n" + "="*60)
-    print(" HEAD MEASUREMENT")
-    print("="*60)
-    print(" [1] Caliper (Ear-to-Ear direct)")
-    print(" [2] Tape Arc (Over Head)")
-    print(" [3] Circumference")
-    print(" [4] Default (150mm)\n")
+    """Get ear-to-ear measurement from user."""
     
-    c = input("Choice: ").strip()
-    if c == "1": 
-        return float(input("Enter mm: ")), "caliper"
-    if c == "2": 
-        arc = float(input("Enter arc mm: "))
-        chord = arc * ARC_TO_CHORD_RATIO
-        print(f"  → Chord: {chord:.1f} mm")
+    print("\n" + "=" * 60)
+    print("HEAD MEASUREMENT")
+    print("=" * 60)
+    print("[1] Caliper (direct ear-to-ear, tragus to tragus)")
+    print("[2] Tape arc (over top of head, ear to ear)")
+    print("[3] Head circumference")
+    print("[4] Default (150mm)")
+    print()
+    
+    choice = input("Choice: ").strip()
+    
+    if choice == "1":
+        mm = float(input("Enter ear-to-ear distance (mm): "))
+        return mm, "caliper"
+    elif choice == "2":
+        arc = float(input("Enter arc measurement (mm): "))
+        chord = arc * ARC_TO_CHORD
+        print(f"  → Ear-to-ear (chord): {chord:.1f} mm")
         return chord, "arc"
-    if c == "3": 
-        circ = float(input("Enter circumference mm: "))
-        chord = circ * CIRCUMFERENCE_TO_EAR_RATIO
+    elif choice == "3":
+        circ = float(input("Enter circumference (mm): "))
+        chord = circ * CIRCUMFERENCE_TO_EAR
         print(f"  → Ear-to-ear: {chord:.1f} mm")
         return chord, "circumference"
-    return 150.0, "default"
+    else:
+        print("  → Using default: 150 mm")
+        return 150.0, "default"
+
 
 # ==============================================================================
-# MAIN
+# MAIN PIPELINE
 # ==============================================================================
 
 def main():
-    print("=" * 70)
-    print("BRIDGE SCRIPT (STEP 3) - FIXED FRAME MAPPING")
-    print("=" * 70)
-    
     # ==========================================================================
-    # 1. LOAD DATA
+    # STEP 1: LOAD DATA
     # ==========================================================================
-    print("\n--- 1. Loading Data ---")
+    print("\n--- Step 1: Loading Data ---")
     
-    if not os.path.exists(TRACKING_FILE):
-        print(f"  ❌ Missing: {TRACKING_FILE}")
-        sys.exit(1)
-    if not os.path.exists(RECON_FILE):
-        print(f"  ❌ Missing: {RECON_FILE}")
-        sys.exit(1)
-        
-    with open(TRACKING_FILE, "rb") as f: 
+    for f, name in [(TRACKING_FILE, "Tracking"), (RECON_FILE, "Reconstruction"), (CROP_FILE, "Crop info")]:
+        if not os.path.exists(f):
+            print(f"  ERROR: {name} not found: {f}")
+            sys.exit(1)
+    
+    with open(TRACKING_FILE, "rb") as f:
         tracking = pickle.load(f)
-    with open(CROP_INFO_FILE, "r") as f: 
+    
+    with open(CROP_FILE, "r") as f:
         crop = json.load(f)
+    
     recon = np.load(RECON_FILE)
     
-    # ==========================================================================
-    # 2. BUILD FRAME MAPPING (FIXED!)
-    # ==========================================================================
-    print("\n--- 2. Building Frame Mapping ---")
+    print(f"  Tracking: {len(tracking)} frames")
+    print(f"  Crop: {crop['w']}x{crop['h']}")
     
-    vggt_indices = recon["frame_mapping_keys"]    # [0, 1, 2, ..., 19]
-    s1_indices = recon["frame_mapping_values"]     # [0, 13, 26, ..., 247]
+    # ==========================================================================
+    # STEP 2: BUILD FRAME MAPPING
+    # ==========================================================================
+    print("\n--- Step 2: Frame Mapping ---")
     
-    # CORRECT mapping: Script1 index → VGGT index
+    vggt_indices = recon["frame_mapping_keys"]
+    s1_indices = recon["frame_mapping_values"]
     s1_to_vggt = {int(s1): int(vggt) for vggt, s1 in zip(vggt_indices, s1_indices)}
     
+    matched = sum(1 for s1 in tracking.keys() if s1 in s1_to_vggt)
     print(f"  VGGT frames: {len(vggt_indices)}")
-    print(f"  Script1 frames in tracking: {len(tracking)}")
-    print(f"  Mapping sample: S1[{s1_indices[0]}]→VGGT[0], S1[{s1_indices[-1]}]→VGGT[{vggt_indices[-1]}]")
+    print(f"  Tracking frames with depth: {matched}")
     
-    # Count how many tracking frames have VGGT depth
-    matched_count = sum(1 for s1_idx in tracking.keys() if s1_idx in s1_to_vggt)
-    print(f"  Tracking frames with VGGT depth: {matched_count}")
-    
-    # ==========================================================================
-    # 3. LOAD DEPTH/CAMERA DATA
-    # ==========================================================================
     depths = np.squeeze(recon["depth"])
-    intrs = np.squeeze(recon["intrinsics"])
-    extrs = np.squeeze(recon["extrinsics"])
-    
-    print(f"\n  Depth shape: {depths.shape}")
-    print(f"  Intrinsics shape: {intrs.shape}")
-    print(f"  Extrinsics shape: {extrs.shape}")
+    intrinsics = np.squeeze(recon["intrinsics"])
+    extrinsics = np.squeeze(recon["extrinsics"])
     
     # ==========================================================================
-    # 4. COLLECT WORLD POINTS
+    # STEP 3: FIRST PASS - UNPROJECT ALL FRAMES (NO ALIGNMENT YET)
     # ==========================================================================
-    print("\n--- 3. Unprojecting to World Space ---")
+    print("\n--- Step 3: First Pass - Unprojecting to 3D ---")
     
-    world_points = {}  # {eid: [list of 3D points]}
-    frames_used = 0
-    points_unprojected = 0
+    all_frames_3d = {}  # {frame_idx: {obj_id: 3D_point}}
     
-    for s1_idx, tracks in tqdm(tracking.items(), desc="  Processing"):
+    for s1_idx, frame_tracks in tqdm(tracking.items(), desc="  Processing"):
         if s1_idx not in s1_to_vggt:
             continue
         
         vggt_idx = s1_to_vggt[s1_idx]
-        frames_used += 1
+        frame_3d = {}
         
-        for eid, (u, v) in tracks.items():
-            u_v, v_v = transform_coords_to_vggt_space(u, v, crop["w"], crop["h"])
-            p3d = unproject_point(u_v, v_v, depths[vggt_idx], intrs[vggt_idx], extrs[vggt_idx])
-            
+        for obj_id, (u, v) in frame_tracks.items():
+            u_vggt, v_vggt = script1_to_vggt_coords(u, v, crop["w"], crop["h"])
+            p3d = unproject_pixel(u_vggt, v_vggt, depths[vggt_idx], 
+                                  intrinsics[vggt_idx], extrinsics[vggt_idx])
             if p3d is not None:
-                if eid not in world_points:
-                    world_points[eid] = []
-                world_points[eid].append(p3d)
-                points_unprojected += 1
+                frame_3d[obj_id] = p3d
+        
+        if frame_3d:
+            all_frames_3d[s1_idx] = frame_3d
     
-    print(f"\n  Frames used: {frames_used}")
-    print(f"  Points unprojected: {points_unprojected}")
-    print(f"  Unique electrodes: {len(world_points)}")
+    print(f"  Frames unprojected: {len(all_frames_3d)}")
     
     # ==========================================================================
-    # 5. ROBUST AVERAGING
+    # STEP 4: BUILD VIRTUAL REFERENCE FROM ALL LANDMARK OBSERVATIONS
     # ==========================================================================
-    print("\n--- 4. Averaging Positions ---")
+    print("\n--- Step 4: Building Virtual Reference ---")
+    print("  (Collecting landmarks from ALL frames, not just one)")
     
-    avg_points = {}
-    skipped_few_obs = 0
+    # Collect all observations of each landmark
+    landmark_observations = {lid: [] for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]}
     
-    for eid, pts in world_points.items():
-        arr = np.array(pts)
-        
-        if len(arr) < 2:
-            skipped_few_obs += 1
-            continue
-        
-        # Outlier removal
-        mean = np.median(arr, axis=0)
-        dists = np.linalg.norm(arr - mean, axis=1)
-        threshold = np.mean(dists) + 2 * np.std(dists)
-        mask = dists < threshold
-        
-        if np.sum(mask) < 2:
-            avg_points[eid] = mean  # Use median if too few after filtering
-        else:
-            avg_points[eid] = np.mean(arr[mask], axis=0)
-        
-        # Print info
-        label = {0: "NAS", 1: "LPA", 2: "RPA"}.get(eid, f"E{eid - NUM_LANDMARKS}")
-        print(f"    {label}: {len(arr)} obs → ({avg_points[eid][0]:.4f}, {avg_points[eid][1]:.4f}, {avg_points[eid][2]:.4f})")
+    for frame_idx, frame_3d in all_frames_3d.items():
+        for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]:
+            if lid in frame_3d:
+                landmark_observations[lid].append(frame_3d[lid])
     
-    print(f"\n  Electrodes with enough observations: {len(avg_points)}")
-    print(f"  Skipped (< 2 observations): {skipped_few_obs}")
+    # Report observations
+    for lid, name in LANDMARK_NAMES.items():
+        n_obs = len(landmark_observations[lid])
+        print(f"  {name}: {n_obs} observations across all frames")
     
-    # ==========================================================================
-    # 6. CHECK LANDMARKS
-    # ==========================================================================
-    print("\n--- 5. Checking Landmarks ---")
+    # Check we have enough observations
+    missing = [LANDMARK_NAMES[lid] for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA] 
+               if len(landmark_observations[lid]) == 0]
     
-    missing_landmarks = []
-    for lid, name in [(LANDMARK_NAS, "NAS"), (LANDMARK_LPA, "LPA"), (LANDMARK_RPA, "RPA")]:
-        if lid in avg_points:
-            print(f"  ✓ {name} found")
-        else:
-            print(f"  ❌ {name} MISSING!")
-            missing_landmarks.append(name)
-    
-    if missing_landmarks:
-        print(f"\n  ❌ Cannot continue without landmarks: {', '.join(missing_landmarks)}")
-        print("  → Check that landmarks are tracked correctly in Script 1")
-        print("  → Use DIFFERENT colored stickers for NAS, LPA, RPA!")
+    if missing:
+        print(f"\n  ERROR: No observations for: {', '.join(missing)}")
+        print("  → Check that landmarks were clicked in Script 1")
+        print("  → Use DIFFERENT colored stickers!")
         sys.exit(1)
     
-    # Check landmark distances (sanity check)
-    nas = avg_points[LANDMARK_NAS]
-    lpa = avg_points[LANDMARK_LPA]
-    rpa = avg_points[LANDMARK_RPA]
+    # Compute reference landmarks (robust average of all observations)
+    ref_landmarks = {}
+    for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]:
+        ref_landmarks[lid] = robust_average(landmark_observations[lid])
+        pos = ref_landmarks[lid]
+        print(f"  {LANDMARK_NAMES[lid]} reference: ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
     
-    ear_dist = np.linalg.norm(rpa - lpa)
-    nas_to_center = np.linalg.norm(nas - (lpa + rpa) / 2)
+    # Sanity check
+    ear_dist = np.linalg.norm(ref_landmarks[LANDMARK_RPA] - ref_landmarks[LANDMARK_LPA])
+    nas_to_center = np.linalg.norm(ref_landmarks[LANDMARK_NAS] - 
+                                   (ref_landmarks[LANDMARK_LPA] + ref_landmarks[LANDMARK_RPA]) / 2)
     
-    print(f"\n  Distances in VGGT units:")
-    print(f"    LPA-RPA (ear-to-ear): {ear_dist:.4f}")
+    print(f"\n  Reference distances (VGGT units):")
+    print(f"    LPA-RPA: {ear_dist:.4f}")
     print(f"    NAS to ear-center: {nas_to_center:.4f}")
     
     if ear_dist < 0.01:
-        print(f"\n  ⚠️ WARNING: LPA-RPA distance is very small ({ear_dist:.6f})")
-        print("     This suggests LPA and RPA are being tracked as the SAME point!")
-        print("     → Use DIFFERENT colored stickers for landmarks!")
+        print("\n  ⚠️ WARNING: LPA-RPA distance is very small!")
+        print("     Landmarks may be tracked as the same point.")
+        print("     → Use DIFFERENT colored stickers!")
     
     # ==========================================================================
-    # 7. GET MEASUREMENT & TRANSFORM
+    # STEP 5: SECOND PASS - ALIGN EACH FRAME TO VIRTUAL REFERENCE
     # ==========================================================================
-    mm, method = get_measurement()
+    print("\n--- Step 5: Second Pass - Aligning Frames ---")
+    print(f"  (Using {MIN_LANDMARKS_FOR_ALIGNMENT}+ landmarks per frame)")
     
-    print(f"\n--- 6. Aligning & Scaling ---")
+    aligned_frames = {}
+    stats = {"aligned": 0, "skipped_few_landmarks": 0}
     
-    transform = define_final_transform(avg_points, mm)
+    for frame_idx, frame_3d in tqdm(all_frames_3d.items(), desc="  Aligning"):
+        # Get landmarks visible in this frame
+        frame_landmarks = {}
+        for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]:
+            if lid in frame_3d:
+                frame_landmarks[lid] = frame_3d[lid]
+        
+        # Need at least MIN_LANDMARKS_FOR_ALIGNMENT landmarks
+        if len(frame_landmarks) < MIN_LANDMARKS_FOR_ALIGNMENT:
+            stats["skipped_few_landmarks"] += 1
+            continue
+        
+        # Build source and target point arrays
+        visible_lids = sorted(frame_landmarks.keys())
+        source_pts = np.array([frame_landmarks[lid] for lid in visible_lids])
+        target_pts = np.array([ref_landmarks[lid] for lid in visible_lids])
+        
+        # Compute Procrustes transform
+        transform = compute_procrustes_transform(source_pts, target_pts)
+        
+        if transform is None:
+            stats["skipped_few_landmarks"] += 1
+            continue
+        
+        # Apply to all points in frame
+        aligned = {}
+        for obj_id, point in frame_3d.items():
+            aligned[obj_id] = apply_procrustes(point, transform)
+        
+        aligned_frames[frame_idx] = aligned
+        stats["aligned"] += 1
+    
+    print(f"\n  Frames aligned: {stats['aligned']}")
+    print(f"  Frames skipped (< {MIN_LANDMARKS_FOR_ALIGNMENT} landmarks): {stats['skipped_few_landmarks']}")
+    
+    if stats["aligned"] == 0:
+        print("\n  ERROR: No frames could be aligned!")
+        print("  → Check landmark tracking quality")
+        sys.exit(1)
+    
+    # ==========================================================================
+    # STEP 6: AVERAGE ALIGNED POSITIONS
+    # ==========================================================================
+    print("\n--- Step 6: Averaging Aligned Positions ---")
+    
+    # Collect observations
+    all_observations = {}
+    for frame_idx, frame_data in aligned_frames.items():
+        for obj_id, point in frame_data.items():
+            if obj_id not in all_observations:
+                all_observations[obj_id] = []
+            all_observations[obj_id].append(point)
+    
+    # Average with outlier removal
+    avg_points = {}
+    
+    for obj_id, observations in all_observations.items():
+        avg = robust_average(observations)
+        if avg is not None:
+            avg_points[obj_id] = avg
+            
+            label = LANDMARK_NAMES.get(obj_id, f"E{obj_id - NUM_LANDMARKS}")
+            print(f"    {label}: {len(observations)} obs → ({avg[0]:.4f}, {avg[1]:.4f}, {avg[2]:.4f})")
+    
+    print(f"\n  Total objects: {len(avg_points)}")
+    
+    # ==========================================================================
+    # STEP 7: ALIGNMENT QUALITY CHECK
+    # ==========================================================================
+    print("\n--- Step 7: Alignment Quality ---")
+    
+    for lid, name in LANDMARK_NAMES.items():
+        if lid in all_observations:
+            pts = np.array(all_observations[lid])
+            if len(pts) > 1:
+                std = np.std(pts, axis=0)
+                print(f"  {name} std dev: ({std[0]:.4f}, {std[1]:.4f}, {std[2]:.4f})")
+    
+    # Verify landmarks exist
+    if not all(lid in avg_points for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]):
+        print("  ERROR: Missing landmarks after averaging!")
+        sys.exit(1)
+    
+    # ==========================================================================
+    # STEP 8: GET MEASUREMENT & BUILD TRANSFORM
+    # ==========================================================================
+    measured_mm, method = get_measurement()
+    
+    print("\n--- Step 8: Building Head Coordinate System ---")
+    
+    transform = build_head_transform(
+        avg_points[LANDMARK_NAS],
+        avg_points[LANDMARK_LPA],
+        avg_points[LANDMARK_RPA],
+        measured_mm
+    )
+    
     if transform is None:
         sys.exit(1)
     
-    print(f"  Scale factor: {transform['scale']:.2f} mm/unit")
+    print(f"  Scale: {transform['scale']:.2f} mm/unit")
     print(f"  Raw ear-to-ear: {transform['raw_ear_dist']:.4f} units")
     
-    # Apply transform to all points
-    final_pts = {}
-    for eid, p in avg_points.items():
-        final_pts[eid] = apply_transform(p, transform)
+    # ==========================================================================
+    # STEP 9: TRANSFORM TO HEAD COORDINATES
+    # ==========================================================================
+    print("\n--- Step 9: Transforming to mm ---")
+    
+    final_points = {}
+    
+    for obj_id, point in avg_points.items():
+        final_points[obj_id] = apply_head_transform(point, transform)
     
     # Add estimated INION
-    final_pts["INION_EST"] = apply_transform(transform["est_inion"], transform)
+    final_points["INION"] = apply_head_transform(transform["inion"], transform)
     
     # ==========================================================================
-    # 8. VERIFICATION
+    # STEP 10: VERIFICATION
     # ==========================================================================
-    print(f"\n--- 7. Verification ---")
+    print("\n--- Step 10: Verification ---")
     
-    lpa_final = final_pts[LANDMARK_LPA]
-    rpa_final = final_pts[LANDMARK_RPA]
-    nas_final = final_pts[LANDMARK_NAS]
-    inion_final = final_pts["INION_EST"]
+    nas_f = final_points[LANDMARK_NAS]
+    lpa_f = final_points[LANDMARK_LPA]
+    rpa_f = final_points[LANDMARK_RPA]
+    inion_f = final_points["INION"]
     
-    final_ear_dist = np.linalg.norm(rpa_final - lpa_final)
-    final_nas_inion = np.linalg.norm(nas_final - inion_final)
+    print(f"\n  Landmark positions (mm):")
+    print(f"    NAS:   ({nas_f[0]:7.1f}, {nas_f[1]:7.1f}, {nas_f[2]:7.1f})")
+    print(f"    LPA:   ({lpa_f[0]:7.1f}, {lpa_f[1]:7.1f}, {lpa_f[2]:7.1f})")
+    print(f"    RPA:   ({rpa_f[0]:7.1f}, {rpa_f[1]:7.1f}, {rpa_f[2]:7.1f})")
+    print(f"    INION: ({inion_f[0]:7.1f}, {inion_f[1]:7.1f}, {inion_f[2]:7.1f})")
     
-    print(f"  Landmark positions (mm):")
-    print(f"    NAS:   ({nas_final[0]:7.1f}, {nas_final[1]:7.1f}, {nas_final[2]:7.1f})")
-    print(f"    LPA:   ({lpa_final[0]:7.1f}, {lpa_final[1]:7.1f}, {lpa_final[2]:7.1f})")
-    print(f"    RPA:   ({rpa_final[0]:7.1f}, {rpa_final[1]:7.1f}, {rpa_final[2]:7.1f})")
-    print(f"    INION: ({inion_final[0]:7.1f}, {inion_final[1]:7.1f}, {inion_final[2]:7.1f})")
+    final_ear = np.linalg.norm(rpa_f - lpa_f)
+    final_nasi = np.linalg.norm(nas_f - inion_f)
     
     print(f"\n  Distances:")
-    print(f"    Ear-to-ear (LPA↔RPA): {final_ear_dist:.1f} mm (should be {mm:.1f})")
-    print(f"    NAS↔INION: {final_nas_inion:.1f} mm")
+    print(f"    Ear-to-ear: {final_ear:.1f} mm (target: {measured_mm:.1f})")
+    print(f"    NAS-INION: {final_nasi:.1f} mm")
     
-    print(f"\n  Expected landmark positions:")
-    print(f"    LPA: ({-mm/2:.1f}, ~0, ~0) mm")
-    print(f"    RPA: ({mm/2:.1f}, ~0, ~0) mm")
+    print(f"\n  Expected positions (head coordinates):")
+    print(f"    LPA: ({-measured_mm/2:.1f}, 0, 0)")
+    print(f"    RPA: ({measured_mm/2:.1f}, 0, 0)")
+    print(f"    NAS: (0, +Y, 0)")
+    print(f"    INION: (0, -Y, 0)")
     
     # ==========================================================================
-    # 9. SAVE JSON
+    # STEP 11: SAVE JSON
     # ==========================================================================
-    print(f"\n--- 8. Saving Results ---")
+    print("\n--- Step 11: Saving Results ---")
     
     output = {
         "coordinate_system": {
@@ -366,64 +620,92 @@ def main():
         "units": "mm",
         "measurement": {
             "method": method,
-            "ear_to_ear_mm": mm,
+            "ear_to_ear_mm": measured_mm,
             "scale_factor": float(transform["scale"]),
+        },
+        "alignment": {
+            "method": "virtual_reference",
+            "description": "Reference built from averaged landmarks across all frames",
+            "frames_aligned": stats["aligned"],
+            "frames_skipped": stats["skipped_few_landmarks"],
+            "min_landmarks_per_frame": MIN_LANDMARKS_FOR_ALIGNMENT,
+        },
+        "landmark_observations": {
+            LANDMARK_NAMES[lid]: len(landmark_observations[lid]) 
+            for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]
         },
         "landmarks": {},
         "electrodes": {}
     }
     
-    for eid, p in final_pts.items():
-        pos_list = p.tolist()
+    for obj_id, pos in final_points.items():
+        pos_list = pos.tolist()
         
-        if eid == "INION_EST":
+        if obj_id == "INION":
             output["landmarks"]["INION"] = pos_list
-        elif isinstance(eid, int):
-            name = {0: "NAS", 1: "LPA", 2: "RPA"}.get(eid, f"E{eid - NUM_LANDMARKS}")
-            if eid < NUM_LANDMARKS:
-                output["landmarks"][name] = pos_list
-            else:
-                output["electrodes"][name] = pos_list
+        elif obj_id == LANDMARK_NAS:
+            output["landmarks"]["NAS"] = pos_list
+        elif obj_id == LANDMARK_LPA:
+            output["landmarks"]["LPA"] = pos_list
+        elif obj_id == LANDMARK_RPA:
+            output["landmarks"]["RPA"] = pos_list
+        else:
+            output["electrodes"][f"E{obj_id - NUM_LANDMARKS}"] = pos_list
     
     output["num_electrodes"] = len(output["electrodes"])
     
     with open(OUTPUT_JSON, "w") as f:
         json.dump(output, f, indent=2)
-    print(f"  ✓ {OUTPUT_JSON}")
+    
+    print(f"✓ {OUTPUT_JSON}")
     
     # ==========================================================================
-    # 10. SAVE PLY
+    # STEP 12: SAVE PLY
     # ==========================================================================
     ply_lines = [
-        "ply", "format ascii 1.0", 
-        f"element vertex {len(final_pts)}",
-        "property float x", "property float y", "property float z",
-        "property uchar red", "property uchar green", "property uchar blue",
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(final_points)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
         "end_header"
     ]
     
-    for eid, p in final_pts.items():
-        if eid == "INION_EST":
-            r, g, b = 255, 165, 0  # Orange
-        elif isinstance(eid, int) and eid < NUM_LANDMARKS:
+    for obj_id, pos in final_points.items():
+        if obj_id == "INION":
+            r, g, b = 255, 165, 0   # Orange
+        elif isinstance(obj_id, int) and obj_id < NUM_LANDMARKS:
             r, g, b = 255, 0, 0    # Red
         else:
             r, g, b = 0, 100, 255  # Blue
-        ply_lines.append(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {r} {g} {b}")
+        
+        ply_lines.append(f"{pos[0]:.4f} {pos[1]:.4f} {pos[2]:.4f} {r} {g} {b}")
     
     with open(OUTPUT_PLY, "w") as f:
         f.write("\n".join(ply_lines))
-    print(f"  ✓ {OUTPUT_PLY}")
+    
+    print(f"✓ {OUTPUT_PLY}")
     
     # ==========================================================================
     # SUMMARY
     # ==========================================================================
     print("\n" + "=" * 70)
-    print("COMPLETE!")
+    print("SCRIPT 3 COMPLETE!")
     print("=" * 70)
     print(f"\n  Landmarks: {len(output['landmarks'])}")
     print(f"  Electrodes: {output['num_electrodes']}")
-    print(f"  Measurement: {method} ({mm:.1f} mm)")
+    print(f"  Measurement: {method} ({measured_mm:.1f} mm)")
+    print(f"\n  Landmark observations:")
+    for name, count in output["landmark_observations"].items():
+        print(f"    {name}: {count} frames")
+    print(f"\n  Frames aligned: {stats['aligned']}/{len(all_frames_3d)}")
+    print(f"\nOutputs:")
+    print(f"  - {OUTPUT_JSON}")
+    print(f"  - {OUTPUT_PLY}")
 
 
 if __name__ == "__main__":

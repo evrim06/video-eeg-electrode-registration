@@ -1,5 +1,28 @@
 """
-VGGT 3D Head Reconstruction 
+
+SCRIPT 2: VGGT 3D RECONSTRUCTION
+
+
+PURPOSE:
+    Generate 3D depth maps and camera parameters from video frames.
+    
+INPUT:
+    - frames/ from Script 1
+    - crop_info.json from Script 1
+    
+OUTPUT:
+    - vggt_output/reconstruction.npz containing:
+        - depth maps (H x W per frame)
+        - intrinsic matrices (camera internal parameters)
+        - extrinsic matrices (camera pose per frame)
+        - frame mapping (VGGT index ↔ Script 1 index)
+
+WHAT VGGT DOES:
+    Given multiple images, VGGT estimates:
+    - Depth: How far each pixel is from the camera
+    - Camera pose: Where the camera was for each image
+    
+    All frames are placed in a common 3D "world" coordinate system.
 
 """
 
@@ -15,98 +38,122 @@ from tqdm import tqdm
 from contextlib import nullcontext
 
 
-
 # CONFIGURATION
 
+
+print("=" * 70)
+print("SCRIPT 2: VGGT 3D RECONSTRUCTION")
+print("=" * 70)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_PATH = os.path.join(BASE_DIR, "vggt")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "results", "vggt_output")
 
-SCRIPT1_FRAMES_DIR = os.path.join(BASE_DIR, "frames")
+FRAME_DIR = os.path.join(BASE_DIR, "frames")
 CROP_INFO_FILE = os.path.join(BASE_DIR, "results", "crop_info.json")
 TEMP_VGGT_DIR = os.path.join(DATA_DIR, "vggt_ready_frames")
+CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
 
-MAX_FRAMES_FOR_3D = 20
-TARGET_SIZE = 518
+MAX_FRAMES = 20      # VGGT memory limit
+VGGT_SIZE = 518      # Required input size
 
 sys.path.insert(0, REPO_PATH)
-
 
 
 # SETUP
 
 
 def setup_environment():
+    """Import VGGT modules."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
     try:
         from vggt.models.vggt import VGGT
         from vggt.utils.load_fn import load_and_preprocess_images
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-        print(" VGGT modules imported")
+        print("VGGT modules imported")
         return VGGT, load_and_preprocess_images, pose_encoding_to_extri_intri
     except ImportError as e:
-        print(f"CRITICAL ERROR: Could not import VGGT.\n   {e}")
+        print(f"ERROR: Could not import VGGT: {e}")
+        print("Make sure VGGT is installed in the 'vggt' folder")
         sys.exit(1)
-
 
 VGGT, load_and_preprocess_images, pose_encoding_to_extri_intri = setup_environment()
 
+# Device setup
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
     print(f"Using GPU: {torch.cuda.get_device_name(0)}")
 else:
     DEVICE = torch.device("cpu")
-    print(" Using CPU. This will be slow!")
+    print("Using CPU - this will be slow!")
+
+print("=" * 70)
 
 
-# 1. LOAD DATA FROM SCRIPT 1
+# STEP 1: LOAD FRAMES FROM SCRIPT 1
 
-
-def load_script1_data():
-    print(f"\n--- 1. Loading Data from Script 1 ---")
+def load_frames():
+    """
+    Load frames from Script 1's output directory.
+    Select MAX_FRAMES evenly spaced throughout the video.
+    """
+    print(f"\n--- Step 1: Loading Frames ---")
     
-    if not os.path.exists(SCRIPT1_FRAMES_DIR):
-        print(f"  Frames folder not found: {SCRIPT1_FRAMES_DIR}")
-        print("     Run Script 1 first!")
+    if not os.path.exists(FRAME_DIR):
+        print(f"ERROR: Frames not found: {FRAME_DIR}")
+        print("Run Script 1 first!")
         sys.exit(1)
-
+    
     if not os.path.exists(CROP_INFO_FILE):
-        print(f"  Crop info not found: {CROP_INFO_FILE}")
-        print("     Run Script 1 first!")
+        print(f"ERROR: Crop info not found: {CROP_INFO_FILE}")
+        print("Run Script 1 first!")
         sys.exit(1)
     
-    all_frames = sorted(glob.glob(os.path.join(SCRIPT1_FRAMES_DIR, "*.jpg")))
+    # Find all frames
+    all_frames = sorted(glob.glob(os.path.join(FRAME_DIR, "*.jpg")))
+    
     if len(all_frames) == 0:
-        print(" Frames folder is empty.")
+        print("ERROR: No frames found!")
         sys.exit(1)
     
     print(f"  Found {len(all_frames)} frames")
     
-    num_select = min(len(all_frames), MAX_FRAMES_FOR_3D)
+    # Select evenly spaced frames
+    num_select = min(len(all_frames), MAX_FRAMES)
     indices = np.linspace(0, len(all_frames) - 1, num_select, dtype=int)
     
     selected_paths = [all_frames[i] for i in indices]
     
+    # Extract Script 1 indices from filenames (format: 00000.jpg)
     script1_indices = []
-    for p in selected_paths:
-        fname = os.path.basename(p)
-        idx = int(os.path.splitext(fname)[0])
+    for path in selected_paths:
+        filename = os.path.basename(path)
+        idx = int(os.path.splitext(filename)[0])
         script1_indices.append(idx)
     
-    print(f" Selected {len(selected_paths)} frames for 3D reconstruction")
+    print(f"✓ Selected {len(selected_paths)} frames for 3D reconstruction")
+    print(f"  Script1 indices: {script1_indices[0]} to {script1_indices[-1]}")
     
     return selected_paths, script1_indices
 
 
 
-# 2. PREPROCESS FOR VGGT
+# STEP 2: PREPROCESS FOR VGGT
 
 
 def preprocess_frames(frame_paths):
-    print(f"\n--- 2. Preprocessing for VGGT ({TARGET_SIZE}x{TARGET_SIZE}) ---")
+    """
+    Resize frames to 518x518 for VGGT.
     
+    VGGT requires fixed 518x518 input. We:
+    1. Scale image so largest dimension = 518
+    2. Pad with black to make exactly 518x518
+    """
+    print(f"\n--- Step 2: Preprocessing ({VGGT_SIZE}x{VGGT_SIZE}) ---")
+    
+    # Clean up temp directory
     if os.path.exists(TEMP_VGGT_DIR):
         shutil.rmtree(TEMP_VGGT_DIR)
     os.makedirs(TEMP_VGGT_DIR, exist_ok=True)
@@ -119,41 +166,53 @@ def preprocess_frames(frame_paths):
             continue
         
         h, w = img.shape[:2]
-        scale = TARGET_SIZE / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
+        
+        # Scale to fit in VGGT_SIZE
+        scale = VGGT_SIZE / max(h, w)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
         
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         
-        pad_w = (TARGET_SIZE - new_w) // 2
-        pad_h = (TARGET_SIZE - new_h) // 2
+        # Pad to VGGT_SIZE x VGGT_SIZE
+        pad_w = (VGGT_SIZE - new_w) // 2
+        pad_h = (VGGT_SIZE - new_h) // 2
+        
         img = cv2.copyMakeBorder(
             img,
-            pad_h, TARGET_SIZE - new_h - pad_h,
-            pad_w, TARGET_SIZE - new_w - pad_w,
-            cv2.BORDER_CONSTANT, value=(0, 0, 0)
+            top=pad_h,
+            bottom=VGGT_SIZE - new_h - pad_h,
+            left=pad_w,
+            right=VGGT_SIZE - new_w - pad_w,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(0, 0, 0)
         )
         
         out_path = os.path.join(TEMP_VGGT_DIR, f"{i:05d}.jpg")
         cv2.imwrite(out_path, img)
         processed_paths.append(out_path)
     
-    print(f"  Preprocessed {len(processed_paths)} frames")
+    print(f"✓ Preprocessed {len(processed_paths)} frames")
     return processed_paths
 
 
 
-# 3. RUN VGGT MODEL
+# STEP 3: RUN VGGT
 
 
 def run_vggt(image_paths):
-    print(f"\n--- 3. Running VGGT Inference ---")
+    """
+    Run VGGT neural network to estimate depth and camera poses.
+    """
+    print(f"\n--- Step 3: Running VGGT Inference ---")
     
-    checkpoint = os.path.join(BASE_DIR, "checkpoints", "vggt_model.pt")
+    # Load/download model
+    checkpoint = os.path.join(CHECKPOINT_DIR, "vggt_model.pt")
     model = VGGT()
     
     if not os.path.exists(checkpoint):
-        print("  ⬇ Downloading model weights (4GB)...")
-        os.makedirs(os.path.dirname(checkpoint), exist_ok=True)
+        print("  Downloading VGGT weights (4GB)...")
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
         
         state = torch.hub.load_state_dict_from_url(
             "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt",
@@ -167,10 +226,12 @@ def run_vggt(image_paths):
     model.to(DEVICE).eval()
     print(" Done!")
     
+    # Load images
     print(f"  Loading {len(image_paths)} images...", end="", flush=True)
     images = load_and_preprocess_images(image_paths).to(DEVICE)
     print(f" Shape: {images.shape}")
     
+    # Run inference with mixed precision on GPU
     if DEVICE.type == "cuda":
         ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
     else:
@@ -178,14 +239,19 @@ def run_vggt(image_paths):
     
     print("  Running inference...", end="", flush=True)
     start = time.time()
+    
     with torch.no_grad(), ctx:
         preds = model(images)
-    print(f" Done ({time.time() - start:.1f}s)")
     
+    print(f" Done! ({time.time() - start:.1f}s)")
+    
+    # Convert pose encoding to matrices
     extrinsic, intrinsic = pose_encoding_to_extri_intri(
-        preds["pose_enc"], images.shape[-2:]
+        preds["pose_enc"],
+        images.shape[-2:]
     )
     
+    # Convert to numpy
     def to_numpy(x):
         return x.float().cpu().numpy()
     
@@ -197,19 +263,22 @@ def run_vggt(image_paths):
         "intrinsic": to_numpy(intrinsic),
     }
     
-    print(f"\n  Raw tensor shapes:")
-    for k, v in results.items():
-        print(f"    {k}: {v.shape}")
+    print(f"\n  Output shapes:")
+    for name, arr in results.items():
+        print(f"    {name}: {arr.shape}")
     
     return results
 
 
 
-# 4. SAVE RESULTS
+# STEP 4: PROCESS AND SAVE
 
 
 def save_data(results, script1_indices):
-    print(f"\n--- 4. Saving Results ---")
+    """
+    Process VGGT output and save for Script 3.
+    """
+    print(f"\n--- Step 4: Saving Results ---")
     
     depth = results["depth"]
     extrinsic = results["extrinsic"]
@@ -222,7 +291,7 @@ def save_data(results, script1_indices):
     print(f"    Extrinsic: {extrinsic.shape}")
     print(f"    Intrinsic: {intrinsic.shape}")
     
-    # Squeeze all size-1 dimensions
+    # Remove size-1 dimensions
     depth = np.squeeze(depth)
     extrinsic = np.squeeze(extrinsic)
     intrinsic = np.squeeze(intrinsic)
@@ -234,7 +303,7 @@ def save_data(results, script1_indices):
     print(f"    Extrinsic: {extrinsic.shape}")
     print(f"    Intrinsic: {intrinsic.shape}")
     
-    # Handle single frame
+    # Handle single frame edge case
     if depth.ndim == 2:
         depth = depth[np.newaxis, ...]
         extrinsic = extrinsic[np.newaxis, ...]
@@ -247,36 +316,35 @@ def save_data(results, script1_indices):
         sys.exit(1)
     
     num_frames, H, W = depth.shape
-    print(f"\n  Processing {num_frames} frames of size {H}x{W}")
+    print(f"\n  Processing {num_frames} frames ({H}x{W})")
     
-    # Check extrinsic format (3x4 or 4x4)
+    # Convert 3x4 extrinsics to 4x4 (needed for matrix inversion)
     extr_rows, extr_cols = extrinsic.shape[-2:]
     is_3x4 = (extr_rows == 3 and extr_cols == 4)
-    print(f"  Extrinsic format: {extr_rows}x{extr_cols}" + (" → will convert to 4x4" if is_3x4 else ""))
     
-    # Unproject each frame
+    if is_3x4:
+        print("  Converting extrinsics from 3x4 to 4x4...")
+        extrinsics_4x4 = np.zeros((num_frames, 4, 4))
+        for i in range(num_frames):
+            extrinsics_4x4[i] = np.eye(4)
+            extrinsics_4x4[i, :3, :] = extrinsic[i]
+    else:
+        extrinsics_4x4 = extrinsic
+    
+    # Create point cloud for visualization
+    print("  Creating point cloud for visualization...")
     all_points = []
     all_colors = []
     all_conf = []
-    extrinsics_4x4 = np.zeros((num_frames, 4, 4))
     
     for i in tqdm(range(num_frames), desc="  Unprojecting"):
         depth_i = depth[i]
-        extr_i = extrinsic[i]
+        extr_i = extrinsics_4x4[i]
         intr_i = intrinsic[i]
         img_i = images[i]
         conf_i = depth_conf[i]
         
-        # Convert 3x4 to 4x4 if needed
-        if is_3x4:
-            extr_4x4 = np.eye(4)
-            extr_4x4[:3, :] = extr_i
-        else:
-            extr_4x4 = extr_i
-        
-        extrinsics_4x4[i] = extr_4x4
-        
-        # Create pixel grid
+        # Create pixel coordinate grid
         u, v = np.meshgrid(np.arange(W), np.arange(H))
         
         # Camera intrinsics
@@ -291,7 +359,7 @@ def save_data(results, script1_indices):
         cam_points = np.stack([x_cam, y_cam, z], axis=-1)
         
         # Transform to world coordinates
-        cam_to_world = np.linalg.inv(extr_4x4)
+        cam_to_world = np.linalg.inv(extr_i)
         
         points_flat = cam_points.reshape(-1, 3)
         ones = np.ones((points_flat.shape[0], 1))
@@ -299,24 +367,21 @@ def save_data(results, script1_indices):
         
         world_points = (cam_to_world @ points_homo.T).T[:, :3]
         
-        # Colors
-        colors_i = (img_i.transpose(1, 2, 0).reshape(-1, 3) * 255).astype(np.uint8)
-        
-        # Confidence
-        conf_flat = conf_i.reshape(-1)
+        # Colors (images are C,H,W format, values 0-1)
+        colors = (img_i.transpose(1, 2, 0).reshape(-1, 3) * 255).astype(np.uint8)
         
         all_points.append(world_points)
-        all_colors.append(colors_i)
-        all_conf.append(conf_flat)
+        all_colors.append(colors)
+        all_conf.append(conf_i.reshape(-1))
     
-    # Combine
+    # Combine all frames
     points = np.vstack(all_points)
     colors = np.vstack(all_colors)
     conf = np.hstack(all_conf)
     
     print(f"\n  Total points: {len(points):,}")
     
-    # Filter invalid
+    # Filter invalid points
     valid = np.isfinite(points).all(axis=1) & (conf > 0)
     points = points[valid]
     colors = colors[valid]
@@ -324,50 +389,55 @@ def save_data(results, script1_indices):
     
     print(f"  Valid points: {len(points):,}")
     
-    # Center
+    # Center point cloud
     center = np.median(points, axis=0)
     points = points - center
     
-    # Save
+    # Save everything
     save_path = os.path.join(OUTPUT_DIR, "reconstruction.npz")
+    
     np.savez_compressed(
         save_path,
-        # Visualization
+        
+        # Point cloud for visualization
         points=points,
         colors=colors,
         confidence=conf,
         center=center,
         
-        # Math data (squeezed, 4x4 extrinsics)
+        # Data for Script 3 (electrode projection)
         images=images,
         depth=depth,
         depth_conf=depth_conf,
         extrinsics=extrinsics_4x4,
         intrinsics=intrinsic,
         
-        # Frame mapping
-        frame_mapping_keys=np.arange(len(script1_indices)),
-        frame_mapping_values=np.array(script1_indices)
+        # Frame mapping: VGGT index ↔ Script 1 index
+        # IMPORTANT: Script 3 uses this to match tracking data to depth data
+        frame_mapping_keys=np.arange(len(script1_indices)),     # VGGT indices [0,1,2,...]
+        frame_mapping_values=np.array(script1_indices)          # Script1 indices [0,13,26,...]
     )
     
-    print(f"\n  Saved: {save_path}")
+    print(f"\n Saved: {save_path}")
+    
     return points, colors, conf
 
 
-
-# 5. VIEWER
+# STEP 5: OPTIONAL VIEWER
 
 
 def launch_viewer(points, colors, conf):
+    """Launch interactive 3D viewer using viser."""
+    
     try:
         import viser
     except ImportError:
-        print("\n⚠ Viser not installed. Skipping viewer.")
+        print("\n Viser not installed. Skipping viewer.")
         print("  Install with: pip install viser")
         return
-
+    
     port = 8080
-    print(f"\n--- Starting Viewer on http://localhost:{port} ---")
+    print(f"\n--- Viewer: http://localhost:{port} ---")
     
     server = viser.ViserServer(port=port)
     server.gui.configure_theme(titlebar_content=None, control_layout="collapsible")
@@ -394,17 +464,17 @@ def launch_viewer(points, colors, conf):
         pcd.colors = colors[mask]
         pcd.point_size = size_slider.value
     
-    for s in [conf_slider, size_slider, cx, cy, cz]:
-        s.on_update(update)
+    for slider in [conf_slider, size_slider, cx, cy, cz]:
+        slider.on_update(update)
     update()
     
-    print("  ✓ Viewer ready! Press Ctrl+C to exit.")
+    print("Viewer ready! Press Ctrl+C to exit.")
     
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n  Shutting down...")
+        print("\n  Shutting down viewer...")
 
 
 
@@ -412,23 +482,26 @@ def launch_viewer(points, colors, conf):
 
 
 def main():
-    print("=" * 70)
-    print("VGGT 3D RECONSTRUCTION (PIPELINE STEP 2)")
-    print("=" * 70)
-    
     total_start = time.time()
     
-    paths, indices = load_script1_data()
-    ready_paths = preprocess_frames(paths)
-    results = run_vggt(ready_paths)
-    pts, cols, cnf = save_data(results, indices)
+    # Run pipeline
+    frame_paths, script1_indices = load_frames()
+    processed_paths = preprocess_frames(frame_paths)
+    results = run_vggt(processed_paths)
+    points, colors, conf = save_data(results, script1_indices)
     
+    # Summary
     total_time = time.time() - total_start
-    print(f"\n{'=' * 70}")
-    print(f"COMPLETE! Total time: {total_time / 60:.1f} minutes")
-    print(f"{'=' * 70}")
     
-    launch_viewer(pts, cols, cnf)
+    print("\n" + "=" * 70)
+    print("SCRIPT 2 COMPLETE!")
+    print("=" * 70)
+    print(f"\nTime: {total_time / 60:.1f} minutes")
+    print(f"\nOutput: {os.path.join(OUTPUT_DIR, 'reconstruction.npz')}")
+    print(f"\nNext: Run Script 3 (2D→3D projection)")
+    
+    # Optional viewer
+    launch_viewer(points, colors, conf)
 
 
 if __name__ == "__main__":
