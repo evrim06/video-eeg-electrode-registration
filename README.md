@@ -17,13 +17,14 @@ Key design principles:
 The pipeline consists of **three main computational stages**:
 
 1. **2D Electrode Detection and Tracking (Script 1)**  
-   EEG electrodes are detected and tracked across video frames using YOLO and SAM2, producing stable 2D electrode trajectories. A head-centered 2D coordinate system is defined using anatomical landmarks.
+   EEG electrodes and anatomical landmarks are detected and tracked across video frames using YOLO and SAM2, producing stable 2D electrode trajectories.
 
 2. **3D Head Reconstruction (Script 2)**  
    A subject-specific 3D head surface is reconstructed from the same video using VGGT, including depth estimation and camera pose recovery.
 
 3. **2D-to-3D Projection and Head Coordinate Alignment (Script 3)**  
-   The tracked 2D electrode positions are projected onto the reconstructed 3D head surface, snapped to the scalp, and transformed into a standardized head coordinate system with metric units (mm).
+   The tracked 2D electrode positions are projected onto the reconstructed 3D surface, aligned across frames using Procrustes analysis, and transformed into a standardized head coordinate system with metric units (mm). INION is estimated geometrically in 3D space.
+
 
 ## Pipeline Workflow
 
@@ -33,29 +34,25 @@ into head-aligned 3D EEG electrode coordinates.
 ```mermaid
 flowchart TD
     %% Global Inputs
-    Video[("Video Input<br>.mp4")]
+    Video[("Video Input.mp4")]
 
     %% ==========================================
-    %% SCRIPT 1: TRACKING
+    %% SCRIPT 1: TRACKING (Simplified - 2D Only)
     %% ==========================================
     subgraph Script1 ["Script 1: Detection & Tracking"]
         direction TB
-        Crop["1. Interactive Crop<br>(Define ROI)"]
-        Extract["2. Extract Frames<br>(every Nth frame)"]
-        Mask["3. Cap Masking<br>(SAM2 + User click)"]
-        Landmarks["4. User Clicks 3 Landmarks<br>(NAS, LPA, RPA)"]
-        Detect["5. Electrode Detection<br>(YOLOv11 + Manual)"]
-        Track["6. Video Tracking<br>(SAM2 propagation)"]
-        Align["7. Frame Alignment<br>(Head-centered coords)"]
-        Average["8. Multi-frame Averaging<br>(Outlier removal)"]
+        Crop["1. Interactive Crop(Define ROI)"]
+        Extract["2. Extract Frames(every Nth frame)"]
+        Mask["3. Cap Masking(SAM2 + User click)"]
+        Landmarks["4. User Clicks 3 Landmarks(NAS, LPA, RPA)⚠️ USE DIFFERENT COLORS!"]
+        Detect["5. Electrode Detection(YOLOv11 + Manual)"]
+        Track["6. Video Tracking(SAM2 propagation)"]
         
         Crop --> Extract
         Extract --> Mask
         Mask --> Landmarks
         Landmarks --> Detect
         Detect --> Track
-        Track --> Align
-        Align --> Average
     end
 
     %% Script 1 Outputs
@@ -63,18 +60,17 @@ flowchart TD
     Extract -.->|"Saved Frames"| FramesDir[("./frames/")]
     Crop -.->|"Crop Metadata"| CropInfo["crop_info.json"]
     Track -.->|"Raw 2D Coords"| TrackPkl["tracking_results.pkl"]
-    Average -.->|"Aligned 2D Coords"| AlignedJson["aligned_positions.json"]
 
     %% ==========================================
     %% SCRIPT 2: RECONSTRUCTION
     %% ==========================================
     subgraph Script2 ["Script 2: 3D Reconstruction"]
         direction TB
-        LoadFrames["1. Load Frames<br>(from Script 1)"]
-        SelectFrames["2. Select Subset<br>(evenly spaced)"]
-        Resize["3. Resize & Pad<br>(to 518×518)"]
-        VGGTModel["4. VGGT Model<br>(Depth + Camera Poses)"]
-        SaveMapping["5. Save Frame Mapping<br>(VGGT idx → Script1 idx)"]
+        LoadFrames["1. Load Frames(from Script 1)"]
+        SelectFrames["2. Select Subset(evenly spaced, max 20)"]
+        Resize["3. Resize & Pad(to 518×518)"]
+        VGGTModel["4. VGGT Model(Depth + Camera Poses)"]
+        SaveMapping["5. Save Frame Mapping(VGGT idx → Script1 idx)"]
         
         LoadFrames --> SelectFrames
         SelectFrames --> Resize
@@ -87,21 +83,25 @@ flowchart TD
     SaveMapping -.->|"3D Data + Mapping"| ReconNpz["reconstruction.npz"]
 
     %% ==========================================
-    %% SCRIPT 3: BRIDGE
+    %% SCRIPT 3: PROJECTION & ALIGNMENT (All Geometry Here!)
     %% ==========================================
-    subgraph Script3 ["Script 3: The Bridge"]
+    subgraph Script3 ["Script 3: 2D→3D Projection & Alignment"]
         direction TB
-        MatchFrames["1. Match Frames<br>(Script1 idx ↔ VGGT idx)"]
-        TransformCoords["2. Transform Coordinates<br>(Original → VGGT 518px space)"]
-        Unproject["3. Unproject to 3D<br>(2D pixel + Depth → 3D point)"]
-        RobustAvg["4. Robust Averaging<br>(Multi-view + outlier removal)"]
-        EstimateInion["5. Estimate INION<br>(from NAS, LPA, RPA geometry)"]
-        Measure["6. User Measurement<br>(Calipers/Tape/Circumference)"]
-        HeadAlign["7. Head Alignment & Scaling<br>(Scale to Real Millimeters)"]
+        MatchFrames["1. Match Frames(Script1 idx ↔ VGGT idx)"]
+        TransformCoords["2. Transform Coordinates(Crop space → VGGT 518px)"]
+        Unproject["3. Unproject ALL Frames to 3D(2D pixel + Depth → 3D point)"]
+        VirtualRef["4. Build Virtual Reference(Average landmarks from ALL frames)"]
+        Procrustes["5. Procrustes Alignment(Align each frame to reference)"]
+        RobustAvg["6. Robust 3D Averaging(Outlier removal)"]
+        EstimateInion["7. Estimate INION in 3D(Perpendicular to ear axis)"]
+        Measure["8. User Measurement(Calipers/Tape/Circumference)"]
+        HeadAlign["9. Head Coordinate System(Origin: ear midpoint, scale to mm)"]
         
         MatchFrames --> TransformCoords
         TransformCoords --> Unproject
-        Unproject --> RobustAvg
+        Unproject --> VirtualRef
+        VirtualRef --> Procrustes
+        Procrustes --> RobustAvg
         RobustAvg --> EstimateInion
         EstimateInion --> Measure
         Measure --> HeadAlign
@@ -115,8 +115,8 @@ flowchart TD
     %% Final Outputs
     HeadAlign ==>|"FINAL OUTPUT"| FinalJson[("electrodes_3d.json")]
     HeadAlign -.->|"3D Visualization"| FinalPly["electrodes_3d.ply"]
-        
 ```
+
 ## Installation
 
 ### Prerequisites
@@ -146,7 +146,7 @@ uv pip install -r requirements.txt
 This pipeline is divided into three steps. You must run them in order.
 
 ### **Step 1: Detection & Tracking**
-**Command:** `python scripts/Script1_yolo_SAM2.py`
+**Command:** `python scripts/script1_tracking_detection.py`
 
 #### **1. Cropping (Head Selection)**
 * **Goal:** Define the Region of Interest (ROI) to help the AI focus.
@@ -156,29 +156,34 @@ This pipeline is divided into three steps. You must run them in order.
     * Press `SPACE` to confirm.
 
 #### **2. Cap Masking (Defining the Safe Zone)**
-**Command:** `python scripts/Script2_vggt.py`
-
 * **Goal:** Prevent the AI from detecting background noise (e.g., buttons on a shirt).
 * **Action:** A "Confirm Cap Mask" window appears with a yellow overlay.
     * **Recommended:** Press `m` for Manual Mode, then click the **center** of the EEG cap.
     * If the yellow mask covers the cap correctly, press `y` to accept.
 
 #### **3. Landmark Selection (Critical)**
-**Command:** `python scripts/Script3_bridge.py`
-
-* **Goal:** Define the head coordinate system for alignment.
+* **Goal:** Define anatomical reference points for head alignment.
 * **Action:** In the main "Pipeline" window, click these **3 points** in exact order:
-    1.  **NAS (Nasion)** - Bridge of nose, between eyebrows
-    2.  **LPA (Left Pre-Auricular)** - Left ear tragus point
-    3.  **RPA (Right Pre-Auricular)** - Right ear tragus point
+    1. **NAS (Nasion)** - Bridge of nose, between eyebrows
+    2. **LPA (Left Pre-Auricular)** - Left ear tragus point
+    3. **RPA (Right Pre-Auricular)** - Right ear tragus point
 
-> **Note:** INION (back of head) is estimated automatically using the geometric relationship with the other landmarks.
+> ! **IMPORTANT:** Use **DIFFERENT colored stickers** for each landmark!
+> - NAS: **Red** sticker
+> - LPA: **Blue** sticker
+> - RPA: **Green** sticker
+>
+> SAM2 cannot distinguish identical objects. Using the same color will cause tracking errors.
+
+> **Note:** INION (back of head) is estimated automatically in Script 3 using 3D geometry.
 
 #### **4. Electrode Detection (The "Sweep & Fill" Strategy)**
 * **Goal:** Label all electrodes exactly once.
 * **Step A (Main Sweep):** Move to a frame (using `A`/`S`) where the most electrodes are visible (usually the front view). Press `D` to run YOLO Auto-Detection. (Do this only ONCE).
 * **Step B (Manual Fill):** Move to side/back views where hidden electrodes appear. Manually **Click** on any new electrodes that were not detected in Step A.
-* *Warning: Do NOT re-click electrodes that already have a dot. The tracker knows where they are.*
+* Press `R` to refresh the Reference Map and see all detected points.
+
+> ! **Warning:** Do NOT re-click electrodes that already have a dot. The tracker knows where they are.
 
 #### **5. Finish & Track**
 * Once all electrodes have a unique ID/dot, press `SPACE`.
@@ -187,29 +192,42 @@ This pipeline is divided into three steps. You must run them in order.
 ---
 
 ### **Step 2: 3D Reconstruction (VGGT)**
-**Command:** `python scripts/pipeline_step2_reconstruction.py`
+
+**Command:** `python scripts/script3_bridge.py`
 
 * **Goal:** Build the 3D geometry of the head using the frames extracted in Step 1.
 * **Action:** The script runs automatically.
-    * *First run:* It will download the VGGT model weights (4GB).
-    * *Runtime:* ~2 minutes on GPU, ~1-2 hours on CPU.
-    * *Visualization:* At the end, a 3D viewer will open showing the point cloud. Close it to finish.
+    * *First run:* It will download the VGGT model weights (~4GB).
+    * *Runtime:* ~2-5 minutes on GPU, ~1-2 hours on CPU.
+    * *Visualization:* At the end, a 3D viewer will open showing the point cloud. Press `Ctrl+C` in the terminal to close it and finish.
 
 ---
 
-### **Step 3: The Bridge (Fusion)**
-**Command:** `python scripts/run_bridge.py`
+### **Step 3: 2D→3D Projection & Alignment**
 
-* **Goal:** Combine 2D tracking data with 3D depth and scale to real-world millimeters.
-* **Action:** The script will pause and ask for a **Head Measurement** to scale the model correctly. You will see these 4 options:
+**Command:** `python scripts/script3_bridge.py`
 
-    1.  **Direct Ear-to-Ear (Caliper):** Measure the straight-line distance between the tragus of each ear.
-    2.  **Tape Over Head (Arc):** Measure from Left Ear $\to$ Top of Head $\to$ Right Ear. (The script automatically converts this arc to a straight line).
-    3.  **Head Circumference:** Measure the circle around the head just above the eyebrows.
-    4.  **Skip (Default):** Use a standard adult average (150mm).
+* **Goal:** Project 2D tracking onto 3D, align frames, and scale to real-world millimeters.
+
+#### What This Script Does:
+1. **Projects** each tracked 2D point onto the 3D surface using depth maps
+2. **Builds a virtual reference** by averaging landmark positions across ALL frames (no need for all 3 landmarks in a single frame)
+3. **Aligns each frame** to the reference using Procrustes analysis
+4. **Averages** aligned 3D positions with outlier removal
+5. **Estimates INION** geometrically in 3D (perpendicular to ear axis)
+6. **Scales** to real millimeters using your measurement
+
+#### Head Measurement Input:
+The script will pause and ask for a **Head Measurement** to scale the model correctly:
+
+| Option | Description | How to Measure |
+|--------|-------------|----------------|
+| **1. Caliper** | Direct ear-to-ear distance | Measure straight line between left and right ear tragus |
+| **2. Tape Arc** | Arc over top of head | Measure from left ear → top of head → right ear (auto-converted) |
+| **3. Circumference** | Head circumference | Measure around the head above the eyebrows (auto-converted) |
+| **4. Default** | Use 150mm | Skip measurement (less accurate) |
 
 * **Input:** Type the number of your choice (e.g., `2`) and then the value in millimeters (e.g., `360`).
-* **Result:** `electrodes_3d.json` (Real-world mm coordinates).
 
 ---
 
@@ -218,22 +236,62 @@ This pipeline is divided into three steps. You must run them in order.
 The results are saved in the `results/` folder:
 
 | File | Description |
-| :--- | :--- |
-| **`electrodes_3d.json`** | **FINAL OUTPUT.** The 3D (X, Y, Z) coordinates of all electrodes in millimeters, aligned to the head center. |
-| `electrodes_3d.ply` | A 3D file of the electrodes you can open in MeshLab or Blender to visualize the positions. |
-| `tracking_results.pkl` | Raw 2D tracking data from Step 1 (Frame-by-frame pixel coordinates). |
-| `aligned_positions.json` | Averaged 2D positions from Step 1 (Useful for 2D topology plots). |
-| `reconstruction.npz` | The dense 3D point cloud and camera parameters generated by VGGT. |
+|:-----|:------------|
+| **`electrodes_3d.json`** | **FINAL OUTPUT.** The 3D (X, Y, Z) coordinates of all electrodes in millimeters, aligned to the head coordinate system. |
+| `electrodes_3d.ply` | A 3D point cloud file you can open in MeshLab, CloudCompare, or Blender to visualize electrode positions. |
+| `tracking_results.pkl` | Raw 2D tracking data from Script 1 (frame-by-frame pixel coordinates). |
+| `crop_info.json` | Crop region metadata from Script 1. |
+| `vggt_output/reconstruction.npz` | The 3D depth maps, camera parameters, and frame mapping from Script 2. |
+
+### Output Coordinate System
+
+The final `electrodes_3d.json` uses a head-centered coordinate system:
+```
+        Z (up)
+        ↑
+        |
+        |      Y (front/NAS)
+        |     ↗
+        |   ↗
+        | ↗
+        +------------→ X (right/RPA)
+       /
+      /
+     ↙ (left/LPA)
+
+Origin: Midpoint between LPA and RPA (ears)
+X-axis: LPA → RPA (left to right)
+Y-axis: INION → NAS (back to front)
+Z-axis: Down → Up (perpendicular)
+Units:  Millimeters (mm)
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| LPA-RPA distance is very small | Same colored stickers | Use DIFFERENT colored stickers for NAS/LPA/RPA |
+| NAS-INION distance > 500mm | Landmark tracking confusion | Re-run Script 1 with different colored stickers |
+| "No observations for NAS/LPA/RPA" | Landmark not clicked or lost | Re-run Script 1, ensure landmarks are clicked |
+| Script 3 shows 0 frames aligned | Less than 2 landmarks visible per frame | Check tracking quality, re-record video with better angles |
+
+---
 
 ## References
 
-1.  **Clausner, T., Dalal, S. S., & Crespo-García, M. (2017).** Photogrammetry-Based Head Digitization for Rapid and Accurate Localization of EEG Electrodes and MEG Fiducial Markers Using a Single Digital SLR Camera. *Frontiers in Neuroscience*, 11, 264.
-2.  **Homölle, S., & Oostenveld, R. (2019).** Using a structured-light 3D scanner to improve EEG source modeling with more accurate electrode positions. *Journal of Neuroscience Methods*, 326, 108378.
-3.  **Jocher, G., et al. (2024).** Ultralytics YOLO. Available at: https://github.com/ultralytics/ultralytics.
-4.  **Ravi, N., et al. (2024).** SAM 2: Segment Anything in Images and Videos. Available at: https://github.com/facebookresearch/sam2.
-5.  **Reis, P. M. R., & Lochmann, M. (2015).** Using a motion capture system for spatial localization of EEG electrodes. *Frontiers in Neuroscience*, 9, 130.
-6.  **Shirazi, S. Y., & Huang, H. J. (2019).** More Reliable EEG Electrode Digitizing Methods Can Reduce Source Estimation Uncertainty, but Current Methods Already Accurately Identify Brodmann Areas. *Frontiers in Neuroscience*, 13, 1159.
-7.  **Taberna, G. A., Marino, M., Ganzetti, M., & Mantini, D. (2019).** Spatial localization of EEG electrodes using 3D scanning. *Journal of Neural Engineering*, 16, 026020.
+1. **Clausner, T., Dalal, S. S., & Crespo-García, M. (2017).** Photogrammetry-Based Head Digitization for Rapid and Accurate Localization of EEG Electrodes and MEG Fiducial Markers Using a Single Digital SLR Camera. *Frontiers in Neuroscience*, 11, 264.
+2. **Homölle, S., & Oostenveld, R. (2019).** Using a structured-light 3D scanner to improve EEG source modeling with more accurate electrode positions. *Journal of Neuroscience Methods*, 326, 108378.
+3. **Jocher, G., et al. (2024).** Ultralytics YOLO. Available at: https://github.com/ultralytics/ultralytics.
+4. **Ravi, N., et al. (2024).** SAM 2: Segment Anything in Images and Videos. Available at: https://github.com/facebookresearch/sam2.
+5. **Reis, P. M. R., & Lochmann, M. (2015).** Using a motion capture system for spatial localization of EEG electrodes. *Frontiers in Neuroscience*, 9, 130.
+6. **Shirazi, S. Y., & Huang, H. J. (2019).** More Reliable EEG Electrode Digitizing Methods Can Reduce Source Estimation Uncertainty, but Current Methods Already Accurately Identify Brodmann Areas. *Frontiers in Neuroscience*, 13, 1159.
+7. **Taberna, G. A., Marino, M., Ganzetti, M., & Mantini, D. (2019).** Spatial localization of EEG electrodes using 3D scanning. *Journal of Neural Engineering*, 16, 026020.
+8. **Wang, J., et al. (2025).** VGGT: Visual Geometry Grounded Transformer. Available at: https://github.com/facebookresearch/vggt.
+
 
 ## Project Timeline
 

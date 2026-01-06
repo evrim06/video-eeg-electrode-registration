@@ -1,7 +1,7 @@
 import pickle
 import matplotlib.pyplot as plt
 
-with open("C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\results\\tracking_smoothed.pkl", "rb") as f:
+with open("C:\\Users\\zugo4834\\Desktop\\video-eeg-electrode-registration\\results\\tracking_results.pkl", "rb") as f:
     data = pickle.load(f)
 
 print(f"Frames: {len(data)}")
@@ -14,7 +14,7 @@ for frame, objs in data.items():
             plt.scatter(x, y, s=3)
 
 plt.gca().invert_yaxis()   # important for image coordinates
-plt.title("All tracked electrode positions (smoothed)")
+plt.title("All tracked electrode positions")
 plt.xlabel("X (pixels)")
 plt.ylabel("Y (pixels)")
 plt.axis("equal")
