@@ -16,13 +16,12 @@ Key design principles:
 
 ## Pipeline Architecture
 
-The pipeline consists of **three main scripts**:
+The pipeline consists of **two** main scripts**:
 
 | Script | Purpose | Key Operations |
 |--------|---------|----------------|
 | **Script 1** | Annotation & Tracking | VGGT reconstruction → Multi-view annotation → 3D triangulation → Projection |
 | **Script 2** | 3D Coordinate Processing | Load 3D points → Head coordinate system → Scale to mm → Export |
-| **Script 3** | Ground Truth Comparison | Load pipeline output → Load scanner .elc → Align → Match electrodes → Metrics |
 
 
 ## Pipeline Workflow
@@ -94,27 +93,6 @@ flowchart TD
     Export -.->|"3D Visualization"| FinalPly["electrodes_3d.ply"]
     Export -.->|"EEG Software"| FinalElc["electrodes.elc"]
 
-    %% ==========================================
-    %% SCRIPT 3: GROUND TRUTH COMPARISON
-    %% ==========================================
-    subgraph Script3 ["Script 3: Ground Truth Comparison"]
-        direction TB
-        LoadPipeline["1. Load Pipeline Output"]
-        LoadGT["2. Load Ground Truth .elc"]
-        AlignCoords["3. Align Coordinate Systems\n(using landmarks)"]
-        MatchElec["4. Match Electrodes\n(Hungarian algorithm)"]
-        Metrics["5. Compute Metrics\n(mean/std/max error)"]
-        
-        LoadPipeline --> AlignCoords
-        LoadGT --> AlignCoords
-        AlignCoords --> MatchElec
-        MatchElec --> Metrics
-    end
-
-    %% Script 3 Data Flow
-    FinalJson --> LoadPipeline
-    ScannerElc[("scanner_recording.elc")] --> LoadGT
-    Metrics -.->|"Results"| CompJson["comparison.json"]
 ```
 
 ---
@@ -228,57 +206,6 @@ The script pauses to ask for a measurement to scale the model:
 * Transforms to head coordinate system
 * Estimates INION using anatomical model
 * Exports `.json`, `.ply`, and `.elc` files
-
----
-
-### **Step 3: Ground Truth Comparison & Analysis**
-
-**Command:** `python scripts/script3.py -p results/electrodes_3d.json -g path/to/scanner.elc`
-
-This script performs comprehensive accuracy analysis following established methodology from Taberna et al. (2019), Clausner et al. (2017), and Mazzonetto et al. (2022).
-
-#### Analysis Steps:
-1. **ICP Alignment** - Aligns pipeline coordinates to ground truth coordinate system
-2. **Euclidean Distance Error** - Computes per-electrode error in mm
-3. **Localization Accuracy (LA)** - Percentage of electrodes within thresholds (3mm, 5mm, 10mm)
-4. **Descriptive Statistics** - Mean, Median, SD, MAD, percentiles
-5. **Statistical Tests** - Shapiro-Wilk normality test, Wilcoxon signed-rank test ready
-
-#### Arguments:
-| Argument | Description |
-|----------|-------------|
-| `-p, --pipeline` | Path to pipeline output JSON file (or directory for batch) |
-| `-g, --ground_truth` | Path to ground truth .elc file (or directory for batch) |
-| `-d, --max_distance` | Maximum matching distance in mm (default: 20) |
-| `-o, --output` | Output file for analysis results |
-| `--batch` | Batch mode: process multiple recordings |
-| `--plot` | Generate visualization plots (histogram, boxplot) |
-
-#### Usage Examples:
-```bash
-# Single recording analysis
-python scripts/script3.py -p results/electrodes_3d.json -g data/scanner/recording.elc
-
-# With visualization
-python scripts/script3.py -p results/electrodes_3d.json -g data/scanner/recording.elc --plot
-
-# Batch analysis (all recordings)
-python scripts/script3.py --batch -p results/ -g data/scanner/ -o analysis_results/
-```
-
-#### Output Metrics:
-- **Mean ± SD** - Standard error metrics (Clausner 2017, Taberna 2019)
-- **Median & MAD** - Robust metrics for outliers (Mazzonetto 2022)
-- **LA<5mm** - Localization Accuracy at 5mm threshold (Taberna 2019: "minimal effect on EEG source localization")
-- **Per-electrode mapping** - E0 → FP1, E1 → FP2, etc.
-
-#### Quality Ratings:
-| Rating | Criteria |
-|--------|----------|
-| EXCELLENT | Mean < 3mm AND LA<5mm > 90% |
-| GOOD | Mean < 5mm AND LA<5mm > 75% |
-| ACCEPTABLE | Mean < 10mm AND LA<5mm > 50% |
-| NEEDS IMPROVEMENT | Otherwise |
 
 ---
 
