@@ -14,16 +14,15 @@ Key design principles:
 - Subject-specific head geometry (no template head models)  
 - Reproducible and modular processing steps  
 
-The pipeline consists of **three main computational stages**:
+## Pipeline Architecture
 
-1. **2D Electrode Detection and Tracking (Script 1)**  
-   EEG electrodes and anatomical landmarks are detected and tracked across video frames using YOLO and SAM2, producing stable 2D electrode trajectories.
+The pipeline consists of **three main scripts**:
 
-2. **3D Head Reconstruction (Script 2)**  
-   A subject-specific 3D head surface is reconstructed from the same video using VGGT, including depth estimation and camera pose recovery.
-
-3. **2D-to-3D Projection and Head Coordinate Alignment (Script 3)**  
-   The tracked 2D electrode positions are projected onto the reconstructed 3D surface, aligned across frames using Procrustes analysis, and transformed into a standardized head coordinate system with metric units (mm). INION is estimated geometrically in 3D space.
+| Script | Purpose | Key Operations |
+|--------|---------|----------------|
+| **Script 1** | Annotation & Tracking | VGGT reconstruction → Multi-view annotation → 3D triangulation → Projection |
+| **Script 2** | 3D Coordinate Processing | Load 3D points → Head coordinate system → Scale to mm → Export |
+| **Script 3** | Ground Truth Comparison | Load pipeline output → Load scanner .elc → Align → Match electrodes → Metrics |
 
 
 ## Pipeline Workflow
