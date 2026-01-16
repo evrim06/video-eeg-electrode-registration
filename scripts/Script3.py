@@ -52,15 +52,17 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+try:
+    import mne
+    HAS_MNE = True
+except ImportError:
+    HAS_MNE = False
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 
-print("=" * 70)
 print("SCRIPT 3: COMPREHENSIVE ACCURACY ANALYSIS")
-print("Following Taberna (2019), Clausner (2017), Mazzonetto (2022)")
-print("=" * 70)
 
 # Accuracy thresholds from literature
 THRESHOLD_EXCELLENT = 3.0   # mm - excellent localization
@@ -82,40 +84,58 @@ FIDUCIAL_VARIANTS = {
 
 def parse_elc_file(filepath):
     """
-    Parse .elc electrode position file.
-    Returns dict: {label: np.array([x, y, z])}
+    Robustly parse .elc electrode position file.
+    Handles standard BESA headers and raw coordinate lists.
     """
     positions = {}
-    
-    with open(filepath, 'r') as f:
+    if not os.path.exists(filepath):
+        print(f"Error: File not found: {filepath}")
+        return positions
+
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     
-    in_positions = False
+    in_positions_block = False
     
     for line in lines:
         line = line.strip()
+        if not line or line.startswith('#'): continue
         
-        if not line or line.startswith('#'):
+        # Header detection (Standard BESA)
+        if "positions" in line.lower() and "=" not in line: 
+            in_positions_block = True
             continue
-        
-        if line.lower().startswith('positions'):
-            in_positions = True
+        if "labels" in line.lower(): 
+            in_positions_block = False
             continue
+            
+        # Strategy 1: strict block parsing (if header was found)
+        # Strategy 2: auto-detection (if line looks like "Name X Y Z")
+        parts = line.split()
         
-        if line.lower().startswith('labels'):
-            in_positions = False
-            continue
-        
-        if in_positions:
-            parts = line.split()
-            if len(parts) >= 4:
-                label = parts[0].upper()
-                try:
-                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-                    positions[label] = np.array([x, y, z])
-                except ValueError:
-                    continue
-    
+        # Check if line has exactly 4 parts (Name X Y Z) or 3 floats
+        if len(parts) >= 3:
+            try:
+                # Try to parse the last 3 items as coordinates
+                x = float(parts[-3])
+                y = float(parts[-2])
+                z = float(parts[-1])
+                
+                # Identify label (everything before the coords)
+                if len(parts) > 3:
+                    label = parts[0].upper()
+                else:
+                    # No label present? Generate one (rare case)
+                    continue 
+                
+                # Filter out metadata lines that might look like floats (e.g. "NumberPositions = 32")
+                if "=" in line: continue
+                
+                positions[label] = np.array([x, y, z])
+                
+            except ValueError:
+                continue # Not a coordinate line
+
     return positions
 
 
@@ -574,6 +594,59 @@ def find_matching_files(pipeline_dir, gt_dir):
     
     return matches
 
+# ==============================================================================
+# MNE-PYTHON INTEGRATION (Paste this BEFORE analyze_single_recording)
+# ==============================================================================
+
+def create_mne_montage(positions_dict):
+    """Convert a dictionary of positions (mm) to MNE Montage (m)."""
+    if 'mne' not in sys.modules: return None
+    
+    nasion = lpa = rpa = None
+    ch_pos = {}
+    
+    for name, pos in positions_dict.items():
+        pos_m = pos / 1000.0  # Convert mm to meters
+        name_u = name.upper()
+        
+        if name_u in ["NAS", "NASION", "NZ"]: nasion = pos_m
+        elif name_u in ["LPA", "LEFT", "A1"]: lpa = pos_m
+        elif name_u in ["RPA", "RIGHT", "A2"]: rpa = pos_m
+        elif name_u != "INION": ch_pos[name] = pos_m
+            
+    try:
+        return mne.channels.make_dig_montage(ch_pos, nasion, lpa, rpa, coord_frame='head')
+    except Exception as e:
+        print(f"MNE Montage error: {e}")
+        return None
+
+def plot_mne_comparison(pipeline_pos, gt_pos, title=" Comparison"):
+    """Render 3D plot of Pipeline (Red) vs Scanner (Blue)."""
+    if 'mne' not in sys.modules: return
+
+    print("\n[MNE] Generating 3D Plot...")
+    mon_p = create_mne_montage(pipeline_pos)
+    mon_g = create_mne_montage(gt_pos)
+    
+    if not mon_p or not mon_g: return
+
+    # Setup 3D Renderer
+    renderer = mne.viz.backends.renderer.create_3d_figure(size=(800, 800), bgcolor='white')
+    
+    # Plot Scanner (Blue)
+    gt_pts = np.array([d['r'] for d in mon_g.dig])
+    renderer.sphere(center=gt_pts, color='blue', scale=0.005)
+    
+    # Plot Pipeline (Red)
+    p_pts = np.array([d['r'] for d in mon_p.dig])
+    renderer.sphere(center=p_pts, color='red', scale=0.005)
+    
+    # Head model
+    renderer.sphere(center=np.array([0, 0, 0]), color='gray', scale=0.095, opacity=0.3)
+    
+    print("  Blue = Scanner (Ground Truth)")
+    print("  Red  = Video Pipeline")
+    renderer.show()
 
 def analyze_single_recording(pipeline_path, gt_path, max_distance=20.0, verbose=True):
     """
@@ -736,6 +809,15 @@ def analyze_single_recording(pipeline_path, gt_path, max_distance=20.0, verbose=
         print(f"    < 3mm (excellent): {la_tiers['excellent_3mm']['percentage']:.1f}%")
         print(f"    < 5mm (good):      {la_tiers['good_5mm']['percentage']:.1f}%")
         print(f"    < 10mm (acceptable): {la_tiers['acceptable_10mm']['percentage']:.1f}%")
+
+    try:
+        import mne
+        # p_final contains the ALIGNED pipeline positions (from Step 4)
+        # g_elec contains the Ground Truth electrodes
+        if "alignment" in results: # Only plot if alignment succeeded
+             plot_mne_comparison(aligned_positions, gt_positions, os.path.basename(pipeline_path))
+    except ImportError:
+        pass
     
     return results
 
@@ -859,6 +941,94 @@ def create_summary_table(all_results, output_path):
     
     return df
 
+# ==============================================================================
+# MNE-PYTHON INTEGRATION
+# ==============================================================================
+
+def create_mne_montage(positions_dict):
+    """
+    Convert a dictionary of positions (in mm) to an MNE Montage (in meters).
+    """
+    if not HAS_MNE:
+        return None
+
+    # Separate landmarks and electrodes
+    nasion = lpa = rpa = None
+    ch_pos = {}
+
+    for name, pos_mm in positions_dict.items():
+        # MNE expects meters, pipeline uses mm
+        pos_m = pos_mm / 1000.0 
+        
+        name_upper = name.upper()
+        if name_upper in ["NAS", "NASION", "NZ"]:
+            nasion = pos_m
+        elif name_upper in ["LPA", "LEFT", "A1"]:
+            lpa = pos_m
+        elif name_upper in ["RPA", "RIGHT", "A2"]:
+            rpa = pos_m
+        elif name_upper != "INION": # Ignore Inion for montage creation usually
+            ch_pos[name] = pos_m
+
+    if nasion is None or lpa is None or rpa is None:
+        print("WARNING: Missing fiducials (NAS/LPA/RPA). MNE Montage might be invalid.")
+    
+    # Create the montage
+    try:
+        montage = mne.channels.make_dig_montage(
+            ch_pos=ch_pos,
+            nasion=nasion,
+            lpa=lpa,
+            rpa=rpa,
+            coord_frame='head'
+        )
+        return montage
+    except Exception as e:
+        print(f"MNE Montage creation failed: {e}")
+        return None
+
+def plot_mne_comparison(pipeline_pos, gt_pos, pipeline_name="Video"):
+    """
+    Plot Pipeline (Red) vs Ground Truth (Blue) using MNE 3D viz.
+    """
+    if not HAS_MNE:
+        print("MNE not installed. Skipping 3D viz.")
+        return
+
+    print("\n[MNE] Generating 3D Comparison Plot...")
+    
+    # Create montages
+    # Note: We create dummy info objects to plot
+    mon_p = create_mne_montage(pipeline_pos)
+    mon_g = create_mne_montage(gt_pos)
+    
+    if not mon_p or not mon_g:
+        return
+
+    # Create dummy info to allow plotting
+    info_p = mne.create_info(ch_names=mon_p.ch_names, sfreq=1000, ch_types='eeg')
+    
+    # Plotting using the internal 3D backend
+    # We plot the Ground Truth as the "main" alignment
+    renderer = mne.viz.backends.renderer.create_3d_figure(
+        size=(800, 800), bgcolor='white'
+    )
+    
+    # 1. Plot Ground Truth (Scanner) in BLUE
+    # We manually extract points to control color easily
+    gt_pts = np.array(list(mon_g.dig[i]['r'] for i in range(len(mon_g.dig))))
+    renderer.sphere(center=gt_pts, color='blue', scale=0.005) # 5mm dots
+    
+    # 2. Plot Pipeline (Video) in RED
+    p_pts = np.array(list(mon_p.dig[i]['r'] for i in range(len(mon_p.dig))))
+    renderer.sphere(center=p_pts, color='red', scale=0.005)
+    
+    # 3. Add simple head model (optional, standard sphere)
+    renderer.sphere(center=np.array([0, 0, 0]), color='gray', scale=0.095, opacity=0.3)
+
+    print("  Blue = Scanner (Ground Truth)")
+    print("  Red  = Video Pipeline")
+    renderer.show()
 
 # ==============================================================================
 # MAIN
@@ -922,7 +1092,6 @@ Examples:
         labels = []
         
         for pipeline_path, gt_path in file_pairs:
-            print(f"\n{'='*60}")
             print(f"Analyzing: {os.path.basename(pipeline_path)}")
             print(f"      vs:  {os.path.basename(gt_path)}")
             
@@ -941,9 +1110,7 @@ Examples:
                 json.dump(results, f, indent=2, default=str)
         
         # Create summary
-        print("\n" + "=" * 70)
         print("BATCH ANALYSIS SUMMARY")
-        print("=" * 70)
         
         successful = [r for r in all_results if r["success"]]
         print(f"\n  Successfully analyzed: {len(successful)}/{len(all_results)}")
@@ -1002,9 +1169,7 @@ Examples:
             mean_err = results["statistics"]["mean_mm"]
             la5 = results["localization_accuracy"]["good_5mm"]["percentage"]
             
-            print("\n" + "=" * 70)
             print("QUALITY ASSESSMENT")
-            print("=" * 70)
             
             if mean_err < 3 and la5 > 90:
                 quality = "EXCELLENT"
@@ -1027,9 +1192,7 @@ Examples:
             print(f"\n  ERROR: {results.get('error', 'Unknown error')}")
             sys.exit(1)
     
-    print("\n" + "=" * 70)
     print("ANALYSIS COMPLETE")
-    print("=" * 70)
 
 
 if __name__ == "__main__":

@@ -31,19 +31,16 @@ flowchart TD
     %% Global Inputs
     Video[("Video Input.mp4")]
 
-    %% ==========================================
-    %% SCRIPT 1: ANNOTATION & TRACKING
-    %% ==========================================
     subgraph Script1 ["Script 1: Annotation & Tracking"]
         direction TB
-        Crop["1. Interactive Crop\n(Define ROI)"]
-        Extract["2. Extract Frames\n(every Nth frame)"]
-        VGGT["3. VGGT Reconstruction\n(Camera poses + Depth maps)"]
-        Cap["4. Cap Masking\n(SAM2 + User click)"]
-        Landmarks["5. Multi-View Landmark Annotation\n(NAS, LPA, RPA in multiple frames)"]
-        Electrodes["6. Multi-View Electrode Annotation\n(Click + YOLO auto-detect)"]
-        Triangulate["7. 3D Triangulation\n(Weighted averaging)"]
-        Project["8. Project to All Frames\n(3D → 2D projection)"]
+        Crop["1. Interactive Crop<br\>(Define ROI)"]
+        Extract["2. Extract Frames<br\>(every Nth frame)"]
+        VGGT["3. VGGT Reconstruction<br\>(Camera poses + Depth maps)"]
+        Cap["4. Cap Masking<br\>(SAM2 + User click)"]
+        Landmarks["5. Multi-View Landmark Annotation<br\>(NAS, LPA, RPA in multiple frames)"]
+        Electrodes["6. Multi-View Electrode Annotation<br\>(Click + YOLO auto-detect)"]
+        Triangulate["7. 3D Triangulation<br\>(Weighted averaging)"]
+        Project["8. Project to All Frames<br\>(3D → 2D projection)"]
         
         Crop --> Extract
         Extract --> VGGT
@@ -62,18 +59,16 @@ flowchart TD
     Project -.->|"2D Tracking"| TrackPkl["tracking_results.pkl"]
     Triangulate -.->|"3D Positions"| Points3D["points_3d_intermediate.pkl"]
 
-    %% ==========================================
-    %% SCRIPT 2: 3D COORDINATE PROCESSING
-    %% ==========================================
+
     subgraph Script2 ["Script 2: 3D Coordinate Processing"]
         direction TB
-        Load3D["1. Load 3D Points\n(from Script 1)"]
-        Verify["2. Verify Landmarks\n(NAS, LPA, RPA geometry)"]
-        Measure["3. User Measurement\n(Calipers/Tape/Circumference)"]
-        HeadCoord["4. Head Coordinate System\n(Origin: ear midpoint)"]
-        Scale["5. Scale to mm\n(using measurement)"]
-        EstInion["6. Estimate INION\n(anatomical model)"]
-        Export["7. Export Files\n(.json, .ply, .elc)"]
+        Load3D["1. Load 3D Points<br\>(from Script 1)"]
+        Verify["2. Verify Landmarks<br\>(NAS, LPA, RPA geometry)"]
+        Measure["3. User Measurement<br\>(Calipers/Tape/Circumference)"]
+        HeadCoord["4. Head Coordinate System<br\>(Origin: ear midpoint)"]
+        Scale["5. Scale to mm<br\>(using measurement)"]
+        EstInion["6. Estimate INION<br\>(anatomical model)"]
+        Export["7. Export Files<br\>(.json, .ply, .elc)"]
         
         Load3D --> Verify
         Verify --> Measure
@@ -92,7 +87,7 @@ flowchart TD
     Export ==>|"FINAL OUTPUT"| FinalJson[("electrodes_3d.json")]
     Export -.->|"3D Visualization"| FinalPly["electrodes_3d.ply"]
     Export -.->|"EEG Software"| FinalElc["electrodes.elc"]
-
+    
 ```
 
 ---
@@ -283,6 +278,7 @@ Units:  Millimeters (mm)
 | "Missing landmarks: NAS/LPA/RPA" | Landmark not annotated | Re-run Script 1, click landmarks in multiple frames |
 | Poor accuracy (>15mm error) | Too few observations | Add more landmark/electrode clicks in different views |
 | Electrodes not appearing in all frames | Depth occlusion | Normal - electrodes only show when visible |
+
 ## References
 
 1. **Clausner, T., Dalal, S. S., & Crespo-García, M. (2017).** Photogrammetry-Based Head Digitization for Rapid and Accurate Localization of EEG Electrodes and MEG Fiducial Markers Using a Single Digital SLR Camera. *Frontiers in Neuroscience*, 11, 264.
@@ -294,6 +290,18 @@ Units:  Millimeters (mm)
 7. **Taberna, G. A., Marino, M., Ganzetti, M., & Mantini, D. (2019).** Spatial localization of EEG electrodes using 3D scanning. *Journal of Neural Engineering*, 16, 026020.
 8. **Wang, J., et al. (2025).** VGGT: Visual Geometry Grounded Transformer. Available at: https://github.com/facebookresearch/vggt.
 
+## Citation
+
+If you use this pipeline in your research, please cite:
+
+```bibtex
+@software{video_eeg_electrode_registration,
+  title = {Video-based EEG Electrode Registration Pipeline},
+  author = {Evrim Evirgen},
+  year = {2025},
+  url = {https://github.com/evrim06/video-eeg-electrode-registration}
+}
+```
 
 ## Project Timeline
 
