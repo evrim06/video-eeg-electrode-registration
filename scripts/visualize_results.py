@@ -64,15 +64,13 @@ def align_points(source_dict, target_dict, used_landmarks=None):
             src_pts.append(source_dict[lm])
             tgt_pts.append(target_dict[lm])
     
-    # Need at least 3 points for 3D alignment
     if len(src_pts) < 3: 
-        # Fallback: Try adding INION if available
         if "INION" in source_dict and "INION" in target_dict:
             src_pts.append(source_dict["INION"])
             tgt_pts.append(target_dict["INION"])
     
     if len(src_pts) < 3:
-        return source_dict, None # Cannot align
+        return source_dict, None
 
     src = np.array(src_pts)
     tgt = np.array(tgt_pts)
@@ -89,7 +87,12 @@ def align_points(source_dict, target_dict, used_landmarks=None):
     # Rotate (Kabsch Algorithm)
     H = src_c.T @ tgt_c
     U, S, Vt = np.linalg.svd(H)
+    
+    # FIX: Ensure proper rotation (det = +1), not reflection (det = -1)
     R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1  # Flip last singular vector
+        R = Vt.T @ U.T
     
     # Apply to all
     aligned = {}

@@ -21,12 +21,66 @@ import shutil
 import gc
 import time
 import glob
+import urllib.request
 from tqdm import tqdm
+from contextlib import nullcontext
 from ultralytics import YOLO
 import colorsys
 
 
+# SAM2 DTYPE PATCH
+
 print("SCRIPT 1: ANNOTATION & TRACKING (WITH QUALITY FILTERING)")
+
+torch.set_default_dtype(torch.float32)
+
+import sam2
+from sam2.modeling.memory_attention import MemoryAttentionLayer, MemoryAttention
+from sam2.modeling.sam.transformer import RoPEAttention
+from sam2.build_sam import build_sam2_video_predictor, build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+_orig_rope = RoPEAttention.forward
+_orig_mem_layer = MemoryAttentionLayer.forward
+_orig_mem = MemoryAttention.forward
+
+def _convert_dtype(obj, dtype):
+    if obj is None: return None
+    if isinstance(obj, torch.Tensor):
+        return obj.to(dtype) if obj.is_floating_point() and obj.dtype != dtype else obj
+    if isinstance(obj, list): return [_convert_dtype(x, dtype) for x in obj]
+    if isinstance(obj, tuple): return tuple(_convert_dtype(x, dtype) for x in obj)
+    if isinstance(obj, dict): return {k: _convert_dtype(v, dtype) for k, v in obj.items()}
+    return obj
+
+def _get_dtype(m):
+    for p in m.parameters():
+        if p.is_floating_point(): return p.dtype
+    return torch.float32
+
+def _patched_rope(self, q, k, v, num_k_exclude_rope=0):
+    with torch.cuda.amp.autocast(enabled=False):
+        d = _get_dtype(self)
+        return _orig_rope(self, _convert_dtype(q,d), _convert_dtype(k,d), _convert_dtype(v,d), num_k_exclude_rope)
+
+def _patched_mem_layer(self, tgt, memory, pos=None, query_pos=None, num_k_exclude_rope=0):
+    with torch.cuda.amp.autocast(enabled=False):
+        d = _get_dtype(self)
+        return _orig_mem_layer(self, _convert_dtype(tgt,d), _convert_dtype(memory,d), 
+                               _convert_dtype(pos,d), _convert_dtype(query_pos,d), num_k_exclude_rope)
+
+def _patched_mem(self, curr, memory, curr_pos=None, memory_pos=None, num_obj_ptr_tokens=0):
+    with torch.cuda.amp.autocast(enabled=False):
+        d = _get_dtype(self)
+        return _orig_mem(self, _convert_dtype(curr,d), _convert_dtype(memory,d),
+                        _convert_dtype(curr_pos,d), _convert_dtype(memory_pos,d), num_obj_ptr_tokens)
+
+RoPEAttention.forward = _patched_rope
+MemoryAttentionLayer.forward = _patched_mem_layer
+MemoryAttention.forward = _patched_mem
+
+print("[OK] SAM2 dtype patch applied")
+
 
 
 # CONFIGURATION
@@ -44,11 +98,17 @@ BASE_DIR = os.path.dirname(SCRIPT_DIR)
 
 VIDEO_DIR = os.path.join(BASE_DIR, "data", "Video_Recordings")
 FRAME_DIR = os.path.join(BASE_DIR, "frames")
-RESULTS_BASE_DIR = os.path.join(BASE_DIR, "results")
+RESULTS_BASE_DIR = os.path.join(BASE_DIR, "results")  # Base results directory
 CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
 VGGT_REPO_PATH = os.path.join(SCRIPT_DIR, "vggt")
 
+# Video-specific directories will be created dynamically
+# e.g., results/IMG_3841/, results/IMG_3842/, etc.
+
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "runs", "detect", "train4", "weights", "best.pt")
+SAM2_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "sam2_hiera_small.pt")
+SAM2_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt"
+SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 
 
 def setup_video_output_dir(video_path):
@@ -61,8 +121,10 @@ def setup_video_output_dir(video_path):
     Returns:
         dict with all output paths for this video
     """
+    # Extract video name without extension
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     
+    # Create video-specific directory structure
     video_results_dir = os.path.join(RESULTS_BASE_DIR, video_name)
     vggt_output_dir = os.path.join(video_results_dir, "vggt_output")
     temp_vggt_dir = os.path.join(BASE_DIR, "data", f"vggt_ready_frames_{video_name}")
@@ -76,7 +138,7 @@ def setup_video_output_dir(video_path):
         "vggt_output_dir": vggt_output_dir,
         "temp_vggt_dir": temp_vggt_dir,
         "tracking_file": os.path.join(video_results_dir, "tracking_results.pkl"),
-        "crop_file": os.path.join(video_results_dir, "crop_info.json"),
+        "crop_file": os.path.join(video_results_dir, "crop_info.json"),  # Fixed: changed from crop_info_file to crop_file
         "masks_cache_file": os.path.join(video_results_dir, "masks_cache.pkl"),
         "points_3d_file": os.path.join(video_results_dir, "points_3d_intermediate.pkl"),
         "visibility_file": os.path.join(video_results_dir, "visibility_stats.pkl"),
@@ -93,7 +155,14 @@ print(f"Base directory: {BASE_DIR}")
 print(f"Video directory: {VIDEO_DIR}")
 print(f"Results base directory: {RESULTS_BASE_DIR}")
 
+SAM2_CONFIG = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2", SAM2_CONFIG_NAME)
+if not os.path.exists(SAM2_CONFIG):
+    for p in [os.path.join(BASE_DIR, "configs", "sam2", SAM2_CONFIG_NAME),
+              os.path.join(BASE_DIR, "configs", SAM2_CONFIG_NAME)]:
+        if os.path.exists(p): SAM2_CONFIG = p; break
+
 # Object IDs
+CAP_MASK_ID = 999
 LANDMARK_NAS = 0
 LANDMARK_LPA = 1
 LANDMARK_RPA = 2
@@ -105,7 +174,7 @@ LANDMARK_SHORT = {0: "NAS", 1: "LPA", 2: "RPA"}
 LANDMARK_COLORS = {0: (0, 0, 255), 1: (255, 0, 0), 2: (0, 255, 0)}
 
 VGGT_SIZE = 518
-MAX_VGGT_FRAMES = 15
+MAX_VGGT_FRAMES = 30
 
 CONFIG = {
     "frame_skip": 5,
@@ -113,29 +182,66 @@ CONFIG = {
     "yolo_conf": 0.25,              # Minimum confidence for YOLO to detect
     "yolo_conf_accept": 0.80,       # Minimum confidence to accept detection (quality filter)
     "mask_alpha": 0.5,
-    "playback_fps": 5,
+    "playback_fps": 15,
+    "cap_mask_expansion": 1.05,
     "projection_search_radius": 30,
     "min_triangulation_angle": 5.0,
+    "sam_box_size": 20,
     "visibility_depth_threshold": 0.1,
 }
 
 
-# HELPER FUNCTIONS
-
+# [KEEPING ALL HELPER FUNCTIONS - COLORS, DISPLAY, MASKS, COORDS - UNCHANGED]
 
 def get_color(obj_id):
     if obj_id in LANDMARK_COLORS:
         return LANDMARK_COLORS[obj_id]
+    if obj_id == CAP_MASK_ID:
+        return (0, 255, 255)
     i = obj_id - ELECTRODE_START_ID if obj_id >= ELECTRODE_START_ID else obj_id
     hue = (i * 0.618033988749895) % 1.0
     r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
     return (int(b * 255), int(g * 255), int(r * 255))
 
-
 def resize_for_display(img, h):
     scale = h / img.shape[0]
     return cv2.resize(img, (int(img.shape[1] * scale), h)), scale
 
+def get_mask_centroid(mask):
+    if mask is None:
+        return None
+    mask_bool = mask > 0
+    if mask_bool.sum() == 0:
+        return None
+    ys, xs = np.where(mask_bool)
+    return float(np.mean(xs)), float(np.mean(ys))
+
+def expand_mask(mask, exp=1.10):
+    mask_bool = mask > 0
+    if exp <= 1.0:
+        return mask_bool
+    ys, xs = np.where(mask_bool)
+    if len(xs) == 0:
+        return mask_bool
+    k = max(3, int(max(ys.ptp(), xs.ptp()) * (exp - 1) * 0.5))
+    if k % 2 == 0:
+        k += 1
+    return cv2.dilate(mask_bool.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+
+def draw_mask_overlay(img, mask, color, alpha=0.5):
+    if mask is None:
+        return img
+    mask_uint8 = (mask > 0).astype(np.uint8)
+    if mask_uint8.sum() == 0:
+        return img
+    overlay = img.copy()
+    if mask_uint8.shape[:2] != img.shape[:2]:
+        mask_uint8 = cv2.resize(mask_uint8, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+    m = mask_uint8 > 0
+    overlay[m] = (overlay[m] * (1-alpha) + np.array(color) * alpha).astype(np.uint8)
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(overlay, contours, -1, color, 2)
+    return overlay
 
 def script1_to_vggt_coords(u, v, crop_w, crop_h, vggt_size=518):
     scale = vggt_size / max(crop_w, crop_h)
@@ -145,7 +251,6 @@ def script1_to_vggt_coords(u, v, crop_w, crop_h, vggt_size=518):
     pad_h = (vggt_size - new_h) // 2
     return u * scale + pad_w, v * scale + pad_h
 
-
 def vggt_to_script1_coords(u_vggt, v_vggt, crop_w, crop_h, vggt_size=518):
     scale = vggt_size / max(crop_w, crop_h)
     new_w = int(crop_w * scale)
@@ -153,7 +258,6 @@ def vggt_to_script1_coords(u_vggt, v_vggt, crop_w, crop_h, vggt_size=518):
     pad_w = (vggt_size - new_w) // 2
     pad_h = (vggt_size - new_h) // 2
     return (u_vggt - pad_w) / scale, (v_vggt - pad_h) / scale
-
 
 def unproject_pixel(u, v, depth_map, intrinsic, extrinsic):
     H, W = depth_map.shape
@@ -176,7 +280,6 @@ def unproject_pixel(u, v, depth_map, intrinsic, extrinsic):
     P_world = (np.linalg.inv(extrinsic) @ P_cam)[:3]
     return P_world
 
-
 def project_3d_to_2d(point_3d, intrinsic, extrinsic):
     P_world = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
     P_cam = extrinsic @ P_world
@@ -189,8 +292,26 @@ def project_3d_to_2d(point_3d, intrinsic, extrinsic):
     v = fy * y_cam / z_cam + cy
     return (u, v), True
 
+def check_visibility(point_3d, frame_idx, depths, intrinsics, extrinsics, crop_info, threshold=0.1):
+    proj, in_front = project_3d_to_2d(point_3d, intrinsics[frame_idx], extrinsics[frame_idx])
+    if not in_front:
+        return False, None
+    u_vggt, v_vggt = proj
+    H, W = depths[frame_idx].shape
+    if not (0 <= u_vggt < W and 0 <= v_vggt < H):
+        return False, None
+    P_world = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
+    P_cam = extrinsics[frame_idx] @ P_world
+    expected_depth = P_cam[2]
+    actual_depth = depths[frame_idx][int(v_vggt), int(u_vggt)]
+    if actual_depth > 0:
+        relative_diff = abs(expected_depth - actual_depth) / expected_depth
+        visible = relative_diff < threshold
+    else:
+        visible = False
+    u_s1, v_s1 = vggt_to_script1_coords(u_vggt, v_vggt, crop_info["w"], crop_info["h"])
+    return visible, (u_s1, v_s1)
 
-# VIDEO SELECTION AND FRAME EXTRACTION
 
 
 def select_video():
@@ -219,17 +340,15 @@ def select_video():
         pass
     return videos[0]
 
-
 def extract_frames(video_path, output_paths):
     """Extract frames from video and save crop info."""
     if os.path.exists(FRAME_DIR):
         shutil.rmtree(FRAME_DIR)
     os.makedirs(FRAME_DIR, exist_ok=True)
-    
+    # Video-specific results directory will be created by setup_video_output_dir()
     cap = cv2.VideoCapture(video_path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     idx, roi, drawing, start = 0, None, False, None
-    
     def mouse(e, x, y, f, p):
         nonlocal roi, drawing, start
         if e == cv2.EVENT_LBUTTONDOWN:
@@ -238,11 +357,9 @@ def extract_frames(video_path, output_paths):
             roi = (min(start[0],x), min(start[1],y), abs(x-start[0]), abs(y-start[1]))
         elif e == cv2.EVENT_LBUTTONUP:
             drawing = False
-    
     cv2.namedWindow("Crop")
     cv2.setMouseCallback("Crop", mouse)
     print("\n--- Draw box around HEAD ---")
-    
     while True:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
@@ -259,16 +376,13 @@ def extract_frames(video_path, output_paths):
         elif k == ord('s'): idx = min(total-1, idx+15)
         elif k in (13,32) and roi: break
         elif k == ord('q'): sys.exit(0)
-    
     cv2.destroyWindow("Crop")
     cap.release()
-    
     sx, sy, sw, sh = int(roi[0]/scale), int(roi[1]/scale), int(roi[2]/scale), int(roi[3]/scale)
     cap = cv2.VideoCapture(video_path)
     skip = CONFIG["frame_skip"]
     frames, fidx, count = [], 0, 0
     print(f"\nExtracting frames (skip={skip})...")
-    
     while True:
         ret, frame = cap.read()
         if not ret: break
@@ -279,8 +393,9 @@ def extract_frames(video_path, output_paths):
             fidx += 1
         count += 1
     cap.release()
-    
     crop_info = {"x": sx, "y": sy, "w": sw, "h": sh, "skip": skip}
+    
+    # Save crop info to video-specific directory
     crop_info_file = output_paths["crop_file"]
     with open(crop_info_file, "w") as f:
         json.dump(crop_info, f)
@@ -288,14 +403,11 @@ def extract_frames(video_path, output_paths):
     print(f"Extracted {len(frames)} frames")
     return frames, crop_info
 
-
-# VGGT RECONSTRUCTION
-
-
 def run_vggt_full(frames, crop_info, output_paths):
     """Run VGGT on frames to get camera poses."""
     print("\n=== RUNNING VGGT FOR CAMERA POSES ===")
     
+    # Extract paths
     vggt_output_dir = output_paths["vggt_output_dir"]
     temp_vggt_dir = output_paths["temp_vggt_dir"]
     
@@ -306,12 +418,10 @@ def run_vggt_full(frames, crop_info, output_paths):
         total_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         used_mem = torch.cuda.memory_allocated() / 1e9
         print(f"  GPU Memory: {used_mem:.1f}GB used / {total_mem:.1f}GB total")
-    
     sys.path.insert(0, VGGT_REPO_PATH)
     from vggt.models.vggt import VGGT
     from vggt.utils.load_fn import load_and_preprocess_images
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-    
     os.makedirs(vggt_output_dir, exist_ok=True)
     all_paths = sorted(glob.glob(os.path.join(FRAME_DIR, "*.jpg")))
     n = min(len(all_paths), MAX_VGGT_FRAMES)
@@ -319,11 +429,9 @@ def run_vggt_full(frames, crop_info, output_paths):
     selected = [all_paths[i] for i in indices]
     s1_indices = [int(os.path.basename(p).split('.')[0]) for p in selected]
     print(f"  Processing {n} frames for VGGT...")
-    
     if os.path.exists(temp_vggt_dir): 
         shutil.rmtree(temp_vggt_dir)
     os.makedirs(temp_vggt_dir)
-    
     processed = []
     for i, path in enumerate(selected):
         img = cv2.imread(path)
@@ -338,11 +446,9 @@ def run_vggt_full(frames, crop_info, output_paths):
         out = os.path.join(temp_vggt_dir, f"{i:05d}.jpg")
         cv2.imwrite(out, img)
         processed.append(out)
-    
     gc.collect()
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    
     checkpoint = os.path.join(CHECKPOINT_DIR, "vggt_model.pt")
     model = VGGT()
     if not os.path.exists(checkpoint):
@@ -353,25 +459,15 @@ def run_vggt_full(frames, crop_info, output_paths):
         torch.save(state, checkpoint)
         del state
         gc.collect()
-    
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.to(DEVICE).eval()
-    
     gc.collect()
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    
     print("  Loading and preprocessing images...")
     images = load_and_preprocess_images(processed).to(DEVICE)
     print(f"  Image tensor shape: {images.shape}")
-
-    del processed  # Free up the list of image paths from CPU RAM
-    gc.collect()   # Force Python to clear unused memory
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache() # Clear unused VRAM on the GPU
-        
-    print(f"  Running VGGT inference (this may take a while)...")
-    
+    print(f"  Running VGGT inference (this may take a minute)...")
     try:
         with torch.no_grad():
             if DEVICE == "cuda":
@@ -391,32 +487,26 @@ def run_vggt_full(frames, crop_info, output_paths):
             sys.exit(1)
         else:
             raise e
-    
     print("  Processing VGGT outputs...")
     E, K = pose_encoding_to_extri_intri(preds["pose_enc"], images.shape[-2:])
     depth = preds["depth"].float().cpu().numpy().squeeze()
     E = E.float().cpu().numpy().squeeze()
     K = K.float().cpu().numpy().squeeze()
-    
     del preds, images, model
     gc.collect()
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    
     if E.shape[-2:] == (3,4):
         E4 = np.zeros((len(s1_indices), 4, 4))
         for i in range(len(s1_indices)):
             E4[i] = np.eye(4)
             E4[i,:3,:] = E[i]
         E = E4
-    
     np.savez_compressed(os.path.join(vggt_output_dir, "reconstruction.npz"),
                        depth=depth, extrinsics=E, intrinsics=K,
                        frame_mapping_keys=np.arange(len(s1_indices)),
                        frame_mapping_values=np.array(s1_indices))
-    
     print(f"[OK] VGGT complete - {len(s1_indices)} frames processed")
-    
     vggt_data = {
         "depths": depth,
         "extrinsics": E,
@@ -427,32 +517,69 @@ def run_vggt_full(frames, crop_info, output_paths):
     }
     return vggt_data
 
-
-# MODEL LOADING
-
-
-def load_yolo():
-    """Load YOLO model for electrode detection."""
-    print(f"\nLoading YOLO model...")
+def load_models():
+    print(f"\nLoading models...")
     yolo = None
     if os.path.exists(YOLO_WEIGHTS):
         yolo = YOLO(YOLO_WEIGHTS)
-        print("  YOLO loaded successfully")
     else:
-        print("  WARNING: YOLO not found, will use manual detection only")
-    return yolo
+        print("WARNING: YOLO not found, will use manual detection only")
+    if not os.path.exists(SAM2_CHECKPOINT):
+        print("Downloading SAM2...")
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        urllib.request.urlretrieve(SAM2_URL, SAM2_CHECKPOINT)
+    sam2_model = build_sam2(SAM2_CONFIG, SAM2_CHECKPOINT, device=DEVICE)
+    sam2_image = SAM2ImagePredictor(sam2_model.float().eval())
+    print("Models loaded")
+    return yolo, sam2_image
+
+def create_cap_mask_single_frame(frame_path, sam2_image):
+    img = cv2.imread(frame_path)
+    disp, scale = resize_for_display(img, CONFIG["display_height"])
+    clicks = []
+    cap = None
+    def mouse(e, x, y, f, p):
+        if e == cv2.EVENT_LBUTTONDOWN:
+            clicks.append((int(x/scale), int(y/scale)))
+    cv2.namedWindow("Cap")
+    cv2.setMouseCallback("Cap", mouse)
+    sam2_image.set_image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    while True:
+        show = disp.copy()
+        if cap is not None:
+            show = draw_mask_overlay(show, cap, (0,255,255), 0.4)
+            cv2.putText(show, "Y:Accept R:Redo", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        else:
+            cv2.putText(show, "Click cap center", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        cv2.imshow("Cap", show)
+        k = cv2.waitKey(1) & 0xFF
+        if clicks and cap is None:
+            with torch.inference_mode():
+                masks, scores, _ = sam2_image.predict(
+                    point_coords=np.array([clicks[-1]]), point_labels=np.array([1]), multimask_output=True)
+            cap = expand_mask(masks[np.argmax(scores)], CONFIG["cap_mask_expansion"])
+            clicks.clear()
+        if k == ord('y') and cap is not None: 
+            break
+        elif k == ord('r'): 
+            cap = None
+        elif k == ord('q'): 
+            sys.exit(0)
+    cv2.destroyWindow("Cap")
+    return cap
 
 
-# MULTI-VIEW ANNOTATOR
-
+# [KEEPING MULTIVIEW ANNOTATOR CLASS]
 
 class MultiViewAnnotator:
-    def __init__(self, frames, vggt_data, crop_info):
+    def __init__(self, frames, vggt_data, crop_info, sam2_image):
         self.frames = frames
         self.vggt_data = vggt_data
         self.crop_info = crop_info
+        self.sam2_image = sam2_image
         self.annotations_2d = {}
         self.positions_3d = {}
+        self.cap_masks = {}
         img0 = cv2.imread(os.path.join(FRAME_DIR, frames[0]))
         _, self.scale = resize_for_display(img0, CONFIG["display_height"])
         self.img_h, self.img_w = img0.shape[:2]
@@ -571,20 +698,16 @@ class MultiViewAnnotator:
         idx = 0
         cv2.namedWindow("Electrodes")
         click_pos = None
-        
         def mouse(e, x, y, f, p):
             nonlocal click_pos
             if e == cv2.EVENT_LBUTTONDOWN:
                 click_pos = (int(x / self.scale), int(y / self.scale))
-        
         cv2.setMouseCallback("Electrodes", mouse)
-        
         while True:
             s1_idx = vggt_frames[idx]
             frame_path = os.path.join(FRAME_DIR, self.frames[s1_idx])
             img = cv2.imread(frame_path)
             disp, _ = resize_for_display(img, CONFIG["display_height"])
-            
             for obj_id in self.annotations_2d:
                 if obj_id < ELECTRODE_START_ID:
                     continue
@@ -603,7 +726,6 @@ class MultiViewAnnotator:
                         cv2.circle(disp, (dx, dy), 6, color, 1)
                         label = f"E{obj_id - ELECTRODE_START_ID}*"
                         cv2.putText(disp, label, (dx + 12, dy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
-            
             for lid in [LANDMARK_NAS, LANDMARK_LPA, LANDMARK_RPA]:
                 if lid in self.positions_3d:
                     proj, visible = self.project_to_frame(lid, s1_idx)
@@ -612,7 +734,6 @@ class MultiViewAnnotator:
                         cv2.circle(disp, (dx, dy), 5, LANDMARK_COLORS[lid], -1)
                         cv2.putText(disp, LANDMARK_SHORT[lid], (dx + 8, dy), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, LANDMARK_COLORS[lid], 1)
-            
             n_electrodes = len([k for k in self.annotations_2d if k >= ELECTRODE_START_ID])
             cv2.rectangle(disp, (0, 0), (disp.shape[1], 70), (0, 0, 0), -1)
             cv2.putText(disp, f"Frame {s1_idx} ({idx+1}/{len(vggt_frames)}) | Electrodes: {n_electrodes}", 
@@ -620,9 +741,7 @@ class MultiViewAnnotator:
             cv2.putText(disp, "A/D:Nav | Click:Add | SPACE:AutoDetect | Q:Done", 
                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
             cv2.imshow("Electrodes", disp)
-            
             k = cv2.waitKey(1) & 0xFF
-            
             if k in [ord('a'), 81]: 
                 idx = max(0, idx - 1)
             elif k in [ord('d'), 83]: 
@@ -667,14 +786,17 @@ class MultiViewAnnotator:
                 res = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
                 if res and res[0].boxes is not None:
                     added = 0
-                    rejected_low_conf = 0
+                    rejected_low_conf = 0  # Track low-confidence rejections
+                    
+                    # Get confidence scores for all detections
                     confidences = res[0].boxes.conf.cpu().numpy()
                     
                     for i, box in enumerate(res[0].boxes.xyxy.cpu().numpy()):
+                        # Check confidence threshold (quality filter)
                         confidence = confidences[i]
                         if confidence < CONFIG["yolo_conf_accept"]:
                             rejected_low_conf += 1
-                            continue
+                            continue  # Skip low-confidence detections
                         
                         cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
                         is_dup = False
@@ -697,6 +819,7 @@ class MultiViewAnnotator:
                             self.annotations_2d[new_id] = {s1_idx: (float(cx), float(cy))}
                             added += 1
                     
+                    # Informative message about quality filtering
                     if rejected_low_conf > 0:
                         print(f"  Auto-detected {added} electrodes (rejected {rejected_low_conf} low-confidence <{CONFIG['yolo_conf_accept']*100:.0f}%)")
                     else:
@@ -704,7 +827,6 @@ class MultiViewAnnotator:
                     self.update_3d_positions()
             elif k == ord('q'):
                 break
-        
         cv2.destroyWindow("Electrodes")
         self.update_3d_positions()
         n_electrodes = len([k for k in self.positions_3d if k >= ELECTRODE_START_ID])
@@ -720,26 +842,21 @@ class MultiViewAnnotator:
         color = LANDMARK_COLORS.get(obj_id, (0, 255, 255))
         cv2.namedWindow(f"Annotate {name}")
         click_pos = None
-        
         def mouse(e, x, y, f, p):
             nonlocal click_pos
             if e == cv2.EVENT_LBUTTONDOWN:
                 click_pos = (int(x / self.scale), int(y / self.scale))
-        
         cv2.setMouseCallback(f"Annotate {name}", mouse)
-        
         while True:
             s1_idx = vggt_frames[idx]
             frame_path = os.path.join(FRAME_DIR, self.frames[s1_idx])
             img = cv2.imread(frame_path)
             disp, _ = resize_for_display(img, CONFIG["display_height"])
-            
             for ann_frame, (u, v) in self.annotations_2d[obj_id].items():
                 if ann_frame == s1_idx:
                     dx, dy = int(u * self.scale), int(v * self.scale)
                     cv2.circle(disp, (dx, dy), 10, color, -1)
                     cv2.circle(disp, (dx, dy), 12, (255, 255, 255), 2)
-            
             if len(self.annotations_2d[obj_id]) >= 1:
                 p3d = self.triangulate_point(obj_id)
                 if p3d is not None:
@@ -755,7 +872,6 @@ class MultiViewAnnotator:
                                                                   self.crop_info["w"], self.crop_info["h"])
                             dx, dy = int(u_s1 * self.scale), int(v_s1 * self.scale)
                             cv2.drawMarker(disp, (dx, dy), (255, 255, 0), cv2.MARKER_CROSS, 20, 2)
-            
             n_obs = len(self.annotations_2d[obj_id])
             cv2.rectangle(disp, (0, 0), (disp.shape[1], 50), (0, 0, 0), -1)
             cv2.putText(disp, f"{name} | Frame {s1_idx} | Observations: {n_obs}", 
@@ -763,9 +879,7 @@ class MultiViewAnnotator:
             cv2.putText(disp, "Click to mark | A/D:Nav | Y:Done | R:Clear", 
                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
             cv2.imshow(f"Annotate {name}", disp)
-            
             k = cv2.waitKey(1) & 0xFF
-            
             if k in [ord('a'), 81]: 
                 idx = max(0, idx - 1)
             elif k in [ord('d'), 83]: 
@@ -797,23 +911,25 @@ class MultiViewAnnotator:
                     print(f"    Need at least 1 annotation!")
             elif k == ord('q'):
                 sys.exit(0)
-        
         cv2.destroyWindow(f"Annotate {name}")
 
 
-# PROJECTION-BASED TRACKING
+# PROJECTION-BASED TRACKING WITH VISIBILITY TRACKING
 
 
-def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
+def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d, sam2_image):
     """
     Generate 2D tracking data by projecting 3D positions to each frame.
-    Tracks visibility frequency for each electrode.
+    
+    NEW: Tracks visibility frequency for each electrode.
     """
+
     print("\n=== GENERATING TRACKING FROM 3D PROJECTIONS (WITH VISIBILITY TRACKING) ===")
+
     
     tracking = {}
     masks_cache = {}
-    visibility_stats = {}
+    visibility_stats = {}  # NEW: Track visibility per electrode
     
     img0 = cv2.imread(os.path.join(FRAME_DIR, frames[0]))
     img_h, img_w = img0.shape[:2]
@@ -823,7 +939,7 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
         visibility_stats[obj_id] = {
             "visible_frames": 0, 
             "total_frames": len(frames),
-            "frame_list": []
+            "frame_list": []  # Track which specific frames
         }
     
     for s1_idx in tqdm(range(len(frames)), desc="Projecting"):
@@ -896,6 +1012,7 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
             
             if is_visible:
                 frame_tracking[obj_id] = (u_s1, v_s1)
+                # NEW: Update visibility tracking
                 visibility_stats[obj_id]["visible_frames"] += 1
                 visibility_stats[obj_id]["frame_list"].append(s1_idx)
         
@@ -905,10 +1022,11 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
     
     print(f" Generated tracking for {len(tracking)} frames")
     
-    # Print visibility statistics
+    # NEW: Print visibility statistics
     print("\n=== VISIBILITY STATISTICS ===")
     all_obj_ids = sorted(list(visibility_stats.keys()))
     
+    # Separate landmarks and electrodes
     landmark_ids = [i for i in all_obj_ids if i < NUM_LANDMARKS]
     electrode_ids = [i for i in all_obj_ids if i >= ELECTRODE_START_ID]
     
@@ -944,8 +1062,7 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
     return tracking, masks_cache, visibility_stats
 
 
-# REVIEW
-
+# REVIEW 
 
 def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
     print("\n=== REVIEW TRACKING ===")
@@ -955,15 +1072,12 @@ def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
     img0 = cv2.imread(os.path.join(FRAME_DIR, frames[0]))
     _, scale = resize_for_display(img0, CONFIG["display_height"])
     cv2.namedWindow("Review")
-    
     while True:
         if playing and time.time() - last_t > 1.0 / CONFIG["playback_fps"]:
             idx = (idx + 1) % len(frames)
             last_t = time.time()
-        
         img = cv2.imread(os.path.join(FRAME_DIR, frames[idx]))
         disp, _ = resize_for_display(img, CONFIG["display_height"])
-        
         if idx in tracking:
             for obj_id, (u, v) in tracking[idx].items():
                 color = get_color(obj_id)
@@ -975,7 +1089,6 @@ def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
                 else:
                     label = f"E{obj_id - ELECTRODE_START_ID}"
                 cv2.putText(disp, label, (dx + 10, dy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
         n_tracked = len(tracking.get(idx, {}))
         has_vggt = idx in vggt_data["s1_to_vggt"]
         cv2.rectangle(disp, (0, 0), (disp.shape[1], 50), (0, 0, 0), -1)
@@ -986,9 +1099,7 @@ def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
         cv2.putText(disp, "A/D:Nav | P:Play | SPACE:Accept | R:Redo", 
                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
         cv2.imshow("Review", disp)
-        
         k = cv2.waitKey(1) & 0xFF
-        
         if k in [ord('a'), 81] and not playing: idx = max(0, idx - 1)
         elif k in [ord('d'), 83] and not playing: idx = min(len(frames) - 1, idx + 1)
         elif k == ord('w') and not playing: idx = max(0, idx - 10)
@@ -1005,8 +1116,7 @@ def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
             sys.exit(0)
 
 
-# SAVE RESULTS
-
+# SAVE WITH VISIBILITY STATS
 
 def save_results(tracking, masks_cache, positions_3d, visibility_stats, output_paths):
     """Save all results to video-specific directory."""
@@ -1029,6 +1139,7 @@ def save_results(tracking, masks_cache, positions_3d, visibility_stats, output_p
         pickle.dump(positions_3d, f)
     print(f" {points_3d_file}")
     
+    # NEW: Save visibility stats
     with open(visibility_file, "wb") as f:
         pickle.dump(visibility_stats, f)
     print(f" {visibility_file}")
@@ -1048,7 +1159,6 @@ def save_results(tracking, masks_cache, positions_3d, visibility_stats, output_p
 
 # MAIN
 
-
 def main():
     video = select_video()
     
@@ -1061,21 +1171,21 @@ def main():
     # Step 1: Extract frames
     frames, crop_info = extract_frames(video, output_paths)
     
-    # Step 2: Run VGGT
+    # Step 2: Run VGGT FIRST
     vggt_data = run_vggt_full(frames, crop_info, output_paths)
     
-    # Step 3: Load YOLO
-    yolo = load_yolo()
+    # Step 3: Load models
+    yolo, sam2_image = load_models()
     
     while True:
         # Step 4: Multi-view annotation
-        annotator = MultiViewAnnotator(frames, vggt_data, crop_info)
+        annotator = MultiViewAnnotator(frames, vggt_data, crop_info, sam2_image)
         annotator.annotate_landmarks()
         annotator.annotate_electrodes(yolo)
         
         # Step 5: Generate tracking with visibility stats
         tracking, masks_cache, visibility_stats = generate_tracking_from_3d(
-            frames, vggt_data, crop_info, annotator.positions_3d
+            frames, vggt_data, crop_info, annotator.positions_3d, sam2_image
         )
         
         # Step 6: Review
@@ -1083,13 +1193,12 @@ def main():
             break
         print("\n  Restarting annotation...\n")
     
-    # Step 7: Save
+    # Step 7: Save (including visibility stats)
     save_results(tracking, masks_cache, annotator.positions_3d, visibility_stats, output_paths)
     
     print("SCRIPT 1 COMPLETE!")
     print(f"Results saved to: {output_paths['results_dir']}")
     print(f"Next: python script2.py")
-
 
 if __name__ == "__main__":
     main()
