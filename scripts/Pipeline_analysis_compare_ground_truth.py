@@ -210,7 +210,7 @@ def plot_top_view_head_map(accuracy_errors, scanner_mean, output_dir, title="Map
 
             norm_error = min(error / vmax, 1.0)
             color = cmap(norm_error)
-            size = 150 + (error * 10) 
+            size = 150
 
             ax.scatter(x_plot, y_plot, c=[color], s=size, edgecolors='black', linewidths=1, zorder=5)
             ax.annotate(label, (x_plot, y_plot), xytext=(0, -15), textcoords="offset points", 
@@ -346,7 +346,7 @@ def main():
     # Plot 5: Pipeline Variability Head Map
     p_vars = {k: v['mean_distance'] for k, v in p_variability.items() if k not in LANDMARKS}
     plot_top_view_head_map(p_vars, p_mean, OUTPUT_DIR, 
-                           title="Pipeline Internal Variability\n(Where is the jitter?)", 
+                           title="Pipeline Internal Variability", 
                            filename="pipeline_variability_map.png")
 
     print(f"All 5 validation plots saved to {OUTPUT_DIR}")
