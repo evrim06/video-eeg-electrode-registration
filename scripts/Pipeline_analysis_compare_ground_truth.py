@@ -225,7 +225,7 @@ def plot_top_view_head_map(accuracy_errors, scanner_mean, output_dir, title="Map
     ax.text(0, -115, 'Back', ha='center', fontsize=12, fontweight='bold')
     ax.set_aspect('equal')
     ax.axis('off')
-    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=30)
 
     plt.savefig(os.path.join(output_dir, filename), dpi=150, bbox_inches='tight')
     plt.close()
@@ -340,7 +340,7 @@ def main():
 
     # Plot 4: Final Accuracy Head Map
     plot_top_view_head_map(acc_errors, s_mean, OUTPUT_DIR, 
-                           title="Inter-Method Accuracy\n(Pipeline Mean vs Scanner Mean)", 
+                           title="Inter-Method Accuracy (Pipeline Mean vs Scanner Mean)", 
                            filename="accuracy_head_map.png")
 
     # Plot 5: Pipeline Variability Head Map
@@ -353,7 +353,7 @@ def main():
     # Plot 6: Scanner Variability Head Map (NEW)
     s_vars = {k: v['mean_distance'] for k, v in s_variability.items() if k not in LANDMARKS}
     plot_top_view_head_map(s_vars, s_mean, OUTPUT_DIR, 
-                           title="Scanner Internal Variability\n(Precision of the Digitizer)", 
+                           title="Scanner Internal Variability (Precision of the Digitizer)", 
                            filename="scanner_variability_map.png",
                            vmax=5) # Lower vmax because scanner should be very precise
     # Print numerical summary
