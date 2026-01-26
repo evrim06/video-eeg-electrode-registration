@@ -22,8 +22,8 @@ The pipeline consists of **two main scripts**:
 
 | Script | Purpose | Key Operations |
 |--------|---------|----------------|
-| **Script 1** | Annotation & Tracking | Crop → Extract frames → VGGT reconstruction → Sequential landmark annotation (NAS→LPA→RPA) → Electrode annotation → 3D triangulation → Save |
-| **Script 2** | 3D Coordinate Processing | Load 3D points → Uncertainty classification → User measurement → Coordinate transform → Scale to mm → Export |
+| **Script 1** | Annotation & Tracking | Crop → Extract frames → VGGT reconstruction → Sequential landmark annotation (NAS→LPA→RPA) → Electrode annotation (with YOLO quality filtering) → 3D triangulation → Review → Save |
+| **Script 2** | 3D Coordinate Processing | Load 3D points → Uncertainty classification → Verify landmarks → User measurement → Coordinate transform → Scale to mm → Export |
 
 ---
 
@@ -36,16 +36,15 @@ flowchart TD
     subgraph Script1 ["Script 1: Annotation & Tracking"]
         direction TB
         Select["1. Select Video"]
-        Crop["2. Interactive Crop<br\>(Define head ROI)"]
-        Extract["3. Extract Frames<br\>(every Nth frame)"]
-        VGGT["4. VGGT Reconstruction<br\>(Camera poses + Depth maps)"]
-        NAS["5a. Annotate NAS<br\>(Window 1: 3-5 clicks)"]
-        LPA["5b. Annotate LPA<br\>(Window 2: 3-5 clicks)"]
-        RPA["5c. Annotate RPA<br\>(Window 3: 3-5 clicks)"]
-        Electrodes["6. Annotate Electrodes<br\>(Window 4: Manual + YOLO)"]
-        Triangulate["7. 3D Triangulation<br\>(Multi-view → 3D positions)"]
-        Quality["8. Quality Filtering<br\>(YOLO 80% confidence)"]
-        Project["9. Project & Track<br\>(3D → 2D all frames)"]
+        Crop["2. Interactive Crop(Define head ROI)"]
+        Extract["3. Extract Frames(every Nth frame)"]
+        VGGT["4. VGGT Reconstruction(Camera poses + Depth maps)"]
+        Landmarks["5. Annotate Landmarks(NAS → LPA → RPA)"]
+        Electrodes["6. Annotate Electrodes(Manual + YOLO 80% filter)"]
+        Triangulate["7. 3D Triangulation(Multi-view → 3D positions)"]
+        Project["8. Project & Track(3D → 2D all frames)"]
+        Review["9. Review Tracking(Accept or Redo)"]
+        Save["10. Save Results"]
         
         Select --> Crop
         Crop --> Extract
@@ -53,12 +52,14 @@ flowchart TD
         VGGT --> Landmarks
         Landmarks --> Electrodes
         Electrodes --> Triangulate
-        Triangulate --> Quality
-        Quality --> Project
+        Triangulate --> Project
+        Project --> Review
+        Review -->|Accept| Save
+        Review -->|Redo| Landmarks
     end
 
     Video --> Select
-    Project -.->|"Video-specific folder"| ResultsFolder[("results/IMG_3841/")]
+    Save -.->|"Video-specific folder"| ResultsFolder[("results/IMG_3841/")]
     ResultsFolder -.-> TrackPkl["tracking_results.pkl"]
     ResultsFolder -.-> Points3D["points_3d_intermediate.pkl"]
     ResultsFolder -.-> Visibility["visibility_stats.pkl"]
@@ -68,22 +69,22 @@ flowchart TD
         direction TB
         SelectRes["1. Select Results Folder"]
         Load3D["2. Load 3D Points"]
-        Verify["3. Verify Landmarks"]
-        Uncertainty["4. Classify Uncertainty"]
+        Uncertainty["3. Classify Uncertainty(Visibility-based)"]
+        Verify["4. Verify Landmarks"]
         Measure["5. User Measurement"]
-        HeadCoord["6. Head Coordinate System"]
-        Scale["7. Scale to mm"]
-        EstInion["8. Estimate INION"]
+        HeadCoord["6. Build Head Coordinate System(includes INION estimation)"]
+        Scale["7. Transform to mm"]
+        Validate["8. Final Verification"]
         Export["9. Export Files"]
         
         SelectRes --> Load3D
-        Load3D --> Verify
-        Verify --> Uncertainty
-        Uncertainty --> Measure
+        Load3D --> Uncertainty
+        Uncertainty --> Verify
+        Verify --> Measure
         Measure --> HeadCoord
         HeadCoord --> Scale
-        Scale --> EstInion
-        EstInion --> Export
+        Scale --> Validate
+        Validate --> Export
     end
 
     ResultsFolder --> SelectRes
@@ -95,7 +96,6 @@ flowchart TD
     
     style FinalJson fill:#90EE90
 ```
-
 ---
 
 ## Installation
@@ -116,12 +116,11 @@ flowchart TD
    - NAS (Nasion): RED sticker
    - LPA (Left ear): BLUE sticker  
    - RPA (Right ear): GREEN sticker
-
 2. **Video recording:**
    - Walk slowly around the subject's head (360° coverage)
    - Record for 30-60 seconds
    - Good lighting (avoid shadows)
-   - Keep camera 50-100cm from head
+   - Keep camera 50 cm from head
 
 3. **File organization:**
    - Place videos in `data/Video_Recordings/`
@@ -163,7 +162,7 @@ flowchart TD
 
 > **If VGGT crashes (out of memory):**
 > - Close other GPU applications
-> - Edit `script1.py` line ~160: `MAX_VGGT_FRAMES = 25`
+> - Edit `script1.py` line ~160: `MAX_VGGT_FRAMES = 15`
 
 ---
 
@@ -195,6 +194,7 @@ flowchart TD
 **Controls (same for all landmark windows):**
 - `A` / `D` - Navigate frames
 - `Left Click` - Add observation for current landmark
+- `R` - Clear all annotations for this landmark
 - `Y` - Accept and move to next landmark
 
 **Tips:**
@@ -204,8 +204,8 @@ flowchart TD
 
 **CRITICAL:** Use **different colored stickers** for each landmark!
 - NAS: RED sticker
-- 🔵 LPA: BLUE sticker
-- 🟢 RPA: GREEN sticker
+- LPA: BLUE sticker
+- RPA: GREEN sticker
 
 ---
 
@@ -220,6 +220,12 @@ flowchart TD
 - `Left Click` - Add electrode (new or add observation to existing)
 - `SPACE` - Run YOLO auto-detection in current frame
 - `Q` - Finish annotation (window closes)
+
+**YOLO Quality Filtering:**
+- YOLO detections below **80% confidence** are automatically rejected
+- This filters out false positives (hair, shadows, reflections)
+- Manual clicks are always accepted (no confidence threshold)
+- You can adjust the threshold by editing `CONFIG["yolo_conf_accept"]` in script1.py
 
 **Recommended workflow:**
 
@@ -243,15 +249,15 @@ flowchart TD
    → Window closes
 
 ```
-**Tips:** Manual clicks works better than YOLO detections. Try to click as much as electrode in different frames.
+**Tips:** Manual clicks works better than YOLO detections. Try to click as much as electrode in different frames. Click electrodes when camera faces them directly.
 
 **Understanding the interface:**
 
 | Visual Element | Meaning |
 |----------------|---------|
-| Red circles | Electrodes detected in current frame |
-| Green circles | Projected electrodes from 3D (not visible in this frame) |
-| Yellow circle | Currently selected electrode |
+| Solid colored circles | Electrodes annotated in current frame |
+| Outlined circles with `*` | Projected electrodes from 3D (visible but not annotated in this frame) |
+| Header info | Frame number, electrode count |
 
 **YOLO Auto-Detection:**
 - Press `SPACE` to run YOLO in current frame
@@ -262,14 +268,46 @@ flowchart TD
 **Tips:**
 - Use `SPACE` for quick bulk detection, then fill gaps manually
 - Click each electrode in 3-5 different frames for best accuracy
-- Clicking near a green (projected) electrode adds an observation to that electrode
+- Clicking near a projected electrode adds an observation to that electrode
 - Don't worry if electrodes only appear in some frames - this is normal due to viewing angles
 
 ---
 
 #### 1.6 Automatic Save
 
-**After pressing `Q` in the electrode annotation window:**
+**After pressing `Q` in electrode annotation, the Review window opens.**
+
+**Goal:** Verify that tracking looks correct before saving
+
+**Controls:**
+- `A` / `D` - Navigate frames (single step)
+- `W` / `S` - Navigate frames (10 frames at a time)
+- `P` - Toggle playback (auto-advance through frames)
+- `SPACE` - Accept tracking and save results
+- `R` - Redo annotation (returns to landmark annotation)
+- `Q` - Quit without saving
+
+**What to look for:**
+- Electrodes should stay in consistent positions on the head
+- Projected points (from 3D) should align with visible electrodes
+- Check multiple viewing angles (front, back, sides)
+
+**Interface shows:**
+- Frame number and total frames
+- PLAY/PAUSE status
+- Number of tracked points in current frame
+- Whether frame has VGGT data or uses interpolation
+
+**Tips:**
+- Use `P` to play through the video and spot any tracking jumps
+- If tracking looks wrong, press `R` to redo annotations
+- Pay attention to frames marked "interp" (interpolated) - these may be less accurate
+
+---
+
+#### 1.7 Automatic Save
+
+**After pressing `SPACE` in the Review window:**
 
 1. Window closes
 2. Script automatically processes and saves results
@@ -326,9 +364,10 @@ Next: python scripts/script2.py
 ```
 
 **What this means:**
-- All electrodes included (no exclusions!)
-- Uncertainty based on visibility frequency
-- Low visibility = normal for temporal/occipital electrodes
+- All electrodes are included (no exclusions!)
+- Uncertainty is based on visibility frequency across frames
+- Low visibility is normal for temporal/occipital electrodes (due to head geometry)
+- Uncertainty levels are saved as metadata in the JSON output
 
 ---
 
@@ -445,11 +484,13 @@ Units:  Millimeters (mm)
 
 | Problem | Solution |
 |---------|----------|
-| **VGGT out of memory** | Reduce `MAX_VGGT_FRAMES` to 25 |
+| **VGGT out of memory** | Reduce `MAX_VGGT_FRAMES` to 10 in Script1 |
 | **"LPA-RPA distance too small"** | Use different colored stickers |
 | **"Missing landmarks"** | Re-run Script 1, click in 3-5 frames |
 | **High uncertainty** | Add more observations from different angles |
 | **YOLO rejects all** | Lower `yolo_conf_accept` to 0.60 |
+| **Tracking looks wrong in review** | Press `R` to redo annotations |
+| **Asymmetric LPA-RPA** | Check landmark annotations; may have swapped LPA/RPA |
 
 ---
 
