@@ -377,15 +377,15 @@ def main():
     # DECIDE WHICH POSITIONS TO USE FOR PLOTTING
     # Priority: 1) Standard montage, 2) Scanner positions
     if standard_montage:
-        print("\n Using standard montage positions for head map visualization")
+        print("\nUsing standard montage positions for head map visualization")
         plot_positions = standard_montage
     else:
-        print("\n Standard montage not found, using scanner positions")
+        print("\nStandard montage not found, using scanner positions")
         plot_positions = s_mean
 
     # --- GENERATE PLOTS ---
 
-    # Plot 1: Scanner Reliability BOX PLOT
+    # Plot 1: Scanner Reliability BOX PLOT with individual points
     fig, ax = plt.subplots(figsize=(10, 6))
     
     # Create clean labels
@@ -394,14 +394,20 @@ def main():
     s_clean_labels = [s_label_map[name] for name in s_sorted_names]
     s_data = [s_distributions[name] for name in s_sorted_names]
     
+    # Create box plot without showing fliers (outliers will be shown as points)
     bp = ax.boxplot(s_data, labels=s_clean_labels, patch_artist=True,
-                    showmeans=True, meanline=True,
-                    boxprops=dict(facecolor='#3498db', alpha=0.7),
+                    showmeans=True, meanline=True, showfliers=False,
+                    boxprops=dict(facecolor='#3498db', alpha=0.6),
                     medianprops=dict(color='red', linewidth=2),
                     meanprops=dict(color='blue', linewidth=2, linestyle='--'),
                     whiskerprops=dict(linewidth=1.5),
-                    capprops=dict(linewidth=1.5),
-                    flierprops=dict(marker='o', markerfacecolor='red', markersize=6, alpha=0.5))
+                    capprops=dict(linewidth=1.5))
+    
+    # Overlay all individual data points
+    for i, (name, data) in enumerate(zip(s_sorted_names, s_data), start=1):
+        # Add small random jitter to x position for visibility
+        x_pos = np.random.normal(i, 0.04, size=len(data))
+        ax.scatter(x_pos, data, alpha=0.6, s=30, color='darkblue', edgecolors='black', linewidth=0.5, zorder=3)
     
     ax.set_title("Scanner Reliability (Internal Consistency)", fontsize=14, fontweight='bold')
     ax.set_ylabel("Deviation from mean (mm)", fontsize=12)
@@ -422,9 +428,9 @@ def main():
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, 'scanner_reliability_boxplot.png'), dpi=150)
     plt.close()
-    print(" Scanner reliability box plot saved")
+    print("Scanner reliability box plot saved")
 
-    # Plot 2: Pipeline Reliability BOX PLOT
+    # Plot 2: Pipeline Reliability BOX PLOT with individual points
     fig, ax = plt.subplots(figsize=(12, 6))
     
     # Create clean labels
@@ -433,14 +439,20 @@ def main():
     p_clean_labels = [p_label_map[name] for name in p_sorted_names]
     p_data = [p_distributions[name] for name in p_sorted_names]
     
+    # Create box plot without showing fliers (outliers will be shown as points)
     bp = ax.boxplot(p_data, labels=p_clean_labels, patch_artist=True,
-                    showmeans=True, meanline=True,
-                    boxprops=dict(facecolor='#e74c3c', alpha=0.7),
+                    showmeans=True, meanline=True, showfliers=False,
+                    boxprops=dict(facecolor='#e74c3c', alpha=0.6),
                     medianprops=dict(color='darkred', linewidth=2),
                     meanprops=dict(color='blue', linewidth=2, linestyle='--'),
                     whiskerprops=dict(linewidth=1.5),
-                    capprops=dict(linewidth=1.5),
-                    flierprops=dict(marker='o', markerfacecolor='darkred', markersize=6, alpha=0.5))
+                    capprops=dict(linewidth=1.5))
+    
+    # Overlay all individual data points
+    for i, (name, data) in enumerate(zip(p_sorted_names, p_data), start=1):
+        # Add small random jitter to x position for visibility
+        x_pos = np.random.normal(i, 0.04, size=len(data))
+        ax.scatter(x_pos, data, alpha=0.6, s=30, color='darkred', edgecolors='black', linewidth=0.5, zorder=3)
     
     ax.set_title("Pipeline Reliability (Internal Consistency)", fontsize=14, fontweight='bold')
     ax.set_ylabel("Deviation from mean (mm)", fontsize=12)
@@ -463,7 +475,7 @@ def main():
     plt.close()
     print("Pipeline reliability box plot saved")
 
-    # Plot 3: Method Comparison - Combined BOX PLOT
+    # Plot 3A: Method Comparison - PER ELECTRODE (full distribution)
     fig, ax = plt.subplots(figsize=(10, 6))
     
     all_scanner_errors = []
@@ -474,28 +486,34 @@ def main():
     for dist_list in p_distributions.values():
         all_pipeline_errors.extend(dist_list)
     
-
-    
+    # Create box plot without showing fliers
     bp = ax.boxplot([all_scanner_errors, all_pipeline_errors], 
                     labels=['Scanner (Digitizer)', 'Pipeline (Video)'],
                     patch_artist=True,
-                    showmeans=True, meanline=True,
-                    boxprops=dict(alpha=0.7),
+                    showmeans=True, meanline=True, showfliers=False,
+                    boxprops=dict(alpha=0.6),
                     medianprops=dict(color='red', linewidth=2),
                     meanprops=dict(color='blue', linewidth=2, linestyle='--'),
                     whiskerprops=dict(linewidth=1.5),
-                    capprops=dict(linewidth=1.5),
-                    flierprops=dict(marker='o', markersize=6, alpha=0.5))
+                    capprops=dict(linewidth=1.5))
     
     bp['boxes'][0].set_facecolor('#3498db')
     bp['boxes'][1].set_facecolor('#e74c3c')
     
+    # Overlay individual electrode points
+    x_pos_scanner = np.random.normal(1, 0.04, size=len(all_scanner_errors))
+    ax.scatter(x_pos_scanner, all_scanner_errors, alpha=0.4, s=20, 
+               color='darkblue', edgecolors='black', linewidth=0.3, zorder=3)
+    
+    x_pos_pipeline = np.random.normal(2, 0.04, size=len(all_pipeline_errors))
+    ax.scatter(x_pos_pipeline, all_pipeline_errors, alpha=0.4, s=20, 
+               color='darkred', edgecolors='black', linewidth=0.3, zorder=3)
+    
     ax.set_ylabel('Deviation from Mean (mm)', fontsize=12)
-    ax.set_title('Repeatability Comparison: Scanner vs Pipeline', fontsize=14, fontweight='bold')
+    ax.set_title('Repeatability Comparison: Per-Electrode Distribution', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     
-
-    # Add visual line annotation with symbols (left side)
+    # Add visual line annotation
     ax.plot([0.02, 0.07], [0.96, 0.96], transform=ax.transAxes, 
             color='red', linewidth=2, solid_capstyle='round')
     ax.text(0.08, 0.96, '= Median', transform=ax.transAxes, 
@@ -507,22 +525,77 @@ def main():
             fontsize=10, verticalalignment='center')
     
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, 'repeatability_comparison.png'), dpi=150)
+    plt.savefig(os.path.join(OUTPUT_DIR, 'repeatability_comparison_per_electrode.png'), dpi=150)
     plt.close()
-    print(" Repeatability comparison saved")
+    print("Repeatability comparison (per-electrode) saved")
+    
+    # Plot 3B: Method Comparison - PER RECORDING (recording-level consistency)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Calculate mean error per recording
+    scanner_recording_means = []
+    for dist_list in s_distributions.values():
+        scanner_recording_means.append(np.mean(dist_list))
+    
+    pipeline_recording_means = []
+    for dist_list in p_distributions.values():
+        pipeline_recording_means.append(np.mean(dist_list))
+    
+    # Create box plot without showing fliers
+    bp = ax.boxplot([scanner_recording_means, pipeline_recording_means], 
+                    labels=['Scanner (Digitizer)', 'Pipeline (Video)'],
+                    patch_artist=True,
+                    showmeans=True, meanline=True, showfliers=False,
+                    boxprops=dict(alpha=0.6),
+                    medianprops=dict(color='red', linewidth=2),
+                    meanprops=dict(color='blue', linewidth=2, linestyle='--'),
+                    whiskerprops=dict(linewidth=1.5),
+                    capprops=dict(linewidth=1.5))
+    
+    bp['boxes'][0].set_facecolor('#3498db')
+    bp['boxes'][1].set_facecolor('#e74c3c')
+    
+    # Overlay individual recording points (10 points each)
+    x_pos_scanner = np.random.normal(1, 0.04, size=len(scanner_recording_means))
+    ax.scatter(x_pos_scanner, scanner_recording_means, alpha=0.6, s=60, 
+               color='darkblue', edgecolors='black', linewidth=0.5, zorder=3)
+    
+    x_pos_pipeline = np.random.normal(2, 0.04, size=len(pipeline_recording_means))
+    ax.scatter(x_pos_pipeline, pipeline_recording_means, alpha=0.6, s=60, 
+               color='darkred', edgecolors='black', linewidth=0.5, zorder=3)
+    
+    ax.set_ylabel('Average Deviation per Recording (mm)', fontsize=12)
+    ax.set_title('Repeatability Comparison: Per-Recording Consistency', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # Add visual line annotation
+    ax.plot([0.02, 0.07], [0.96, 0.96], transform=ax.transAxes, 
+            color='red', linewidth=2, solid_capstyle='round')
+    ax.text(0.08, 0.96, '= Median', transform=ax.transAxes, 
+            fontsize=10, verticalalignment='center')
+    
+    ax.plot([0.02, 0.07], [0.91, 0.91], transform=ax.transAxes, 
+            color='blue', linewidth=2, linestyle='--', solid_capstyle='round')
+    ax.text(0.08, 0.91, '= Mean', transform=ax.transAxes, 
+            fontsize=10, verticalalignment='center')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, 'repeatability_comparison_per_recording.png'), dpi=150)
+    plt.close()
+    print("✓ Repeatability comparison (per-recording) saved")
 
     # Plot 4: Accuracy Head Map (use standard montage or scanner positions)
     plot_top_view_head_map(acc_errors, plot_positions, OUTPUT_DIR, 
                            title="Inter-Method Accuracy (Pipeline Mean vs Scanner Mean)", 
                            filename="accuracy_head_map.png")
-    print(" Accuracy head map saved")
+    print("Accuracy head map saved")
 
     # Plot 5: Pipeline Variability Head Map (use standard montage or scanner positions)
     p_vars = {k: v['mean_distance'] for k, v in p_variability.items() if k not in LANDMARKS}
     plot_top_view_head_map(p_vars, plot_positions, OUTPUT_DIR, 
                            title="Pipeline Internal Variability", 
                            filename="pipeline_variability_map.png")
-    print(" Pipeline variability map saved")
+    print("Pipeline variability map saved")
 
     # Plot 6: Scanner Variability Head Map (use standard montage or scanner positions)
     s_vars = {k: v['mean_distance'] for k, v in s_variability.items() if k not in LANDMARKS}
@@ -530,10 +603,9 @@ def main():
                            title="Scanner Internal Variability", 
                            filename="scanner_variability_map.png",
                            vmax=5)
-    print(" Scanner variability map saved")
+    print("Scanner variability map saved")
 
     # Print numerical summary
-
     print("ERROR CALCULATION SUMMARY")
     
     print("\n1. SCANNER REPEATABILITY (Internal Consistency)")
