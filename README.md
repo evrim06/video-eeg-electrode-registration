@@ -18,20 +18,21 @@ Key design principles:
 
 ## Pipeline Architecture
 
+
 The pipeline consists of **two main scripts**:
 
 | Script | Purpose | Key Operations |
 |--------|---------|----------------|
 | **Script 1** | Annotation & Tracking | Crop → Extract frames → VGGT reconstruction → Sequential landmark annotation (NAS→LPA→RPA) → Electrode annotation (with YOLO quality filtering) → 3D triangulation → Review → Save |
-| **Script 2** | 3D Coordinate Processing | Load 3D points → Uncertainty classification → Verify landmarks → User measurement → Coordinate transform → Scale to mm → Export |
-
+| **Script 2** | 3D Coordinate Processing | Load 3D points → Verify landmarks → User measurement → Coordinate transform → Scale to mm → Export |
 ---
+
 
 ## Pipeline Workflow
 
 ```mermaid
 flowchart TD
-    Video[("Video Input\nIMG_3841.mp4")]
+    Video[("Video Input<br>IMG_3841.mp4")]
 
     subgraph Script1 ["Script 1: Annotation & Tracking"]
         direction TB
@@ -62,29 +63,25 @@ flowchart TD
     Save -.->|"Video-specific folder"| ResultsFolder[("results/IMG_3841/")]
     ResultsFolder -.-> TrackPkl["tracking_results.pkl"]
     ResultsFolder -.-> Points3D["points_3d_intermediate.pkl"]
-    ResultsFolder -.-> Visibility["visibility_stats.pkl"]
+    ResultsFolder -.-> CropInfo["crop_info.json"]
     ResultsFolder -.-> VGGTDir["vggt_output/"]
 
     subgraph Script2 ["Script 2: 3D Coordinate Processing"]
         direction TB
         SelectRes["1. Select Results Folder"]
         Load3D["2. Load 3D Points"]
-        Uncertainty["3. Classify Uncertainty(Visibility-based)"]
-        Verify["4. Verify Landmarks"]
-        Measure["5. User Measurement"]
-        HeadCoord["6. Build Head Coordinate System(includes INION estimation)"]
-        Scale["7. Transform to mm"]
-        Validate["8. Final Verification"]
-        Export["9. Export Files"]
+        Verify["3. Verify Landmarks"]
+        Measure["4. User Measurement"]
+        HeadCoord["5. Build Head Coordinate System(includes INION estimation)"]
+        Scale["6. Transform to mm"]
+        Export["7. Export Files"]
         
         SelectRes --> Load3D
-        Load3D --> Uncertainty
-        Uncertainty --> Verify
+        Load3D --> Verify
         Verify --> Measure
         Measure --> HeadCoord
         HeadCoord --> Scale
-        Scale --> Validate
-        Validate --> Export
+        Scale --> Export
     end
 
     ResultsFolder --> SelectRes
@@ -102,7 +99,7 @@ flowchart TD
 
 ### Prerequisites
 - Python 3.12+
-- NVIDIA GPU with CUDA support (Recommended for fast processing)
+- NVIDIA GPU with CUDA support (Recommended for fast processing, but CPU works too)
 - [uv](https://github.com/astral-sh/uv) (Fast Python package installer)
 
 
@@ -128,7 +125,7 @@ flowchart TD
 
 ---
 
-### **Step 1: Annotation & Tracking**
+## **Step 1: Annotation & Tracking**
 
 **Command:** `python scripts/script1.py`
 
@@ -156,13 +153,15 @@ flowchart TD
 #### 1.3 VGGT 3D Reconstruction
 **Automatic step** - runs after cropping
 
-**Timing:**
-- GPU (NVIDIA): 1-3 minutes
-- CPU: 20-30 minutes
+**Processing:**
+- Uses 28 frames evenly distributed across the video
+- Runs in isolated subprocess for memory management
 
-> **If VGGT crashes (out of memory):**
-> - Close other GPU applications
-> - Edit `script1.py` line ~160: `MAX_VGGT_FRAMES = 15`
+**Timing:**
+- GPU (NVIDIA): 2-5 minutes
+- CPU: 30-60 minutes (be patient!)
+
+> **Note:** On CPU, VGGT will take significantly longer but will complete. There is no timeout - the process runs until finished.
 
 ---
 
@@ -221,6 +220,11 @@ flowchart TD
 - `SPACE` - Run YOLO auto-detection in current frame
 - `Q` - Finish annotation (window closes)
 
+**Smart Electrode Matching:**
+- When you click on an electrode from a different viewpoint, the script automatically matches it to existing electrodes using 3D position comparison
+- This prevents duplicate electrodes when annotating the same electrode from different camera angles
+- Console shows "3D match" or "2D match" when adding observations to existing electrodes
+
 **YOLO Quality Filtering:**
 - YOLO detections below **80% confidence** are automatically rejected
 - This filters out false positives (hair, shadows, reflections)
@@ -237,6 +241,7 @@ flowchart TD
 2. Navigate to LEFT side view
    → Manually click any missing electrodes
    → Click near existing (projected) electrodes to add observations
+   → Console shows: "Added observation to E5 (3D match, dist=0.082)"
 
 3. Navigate to RIGHT side view
    → Click remaining missing electrodes
@@ -273,7 +278,7 @@ flowchart TD
 
 ---
 
-#### 1.6 Automatic Save
+#### 1.6 Review Window
 
 **After pressing `Q` in electrode annotation, the Review window opens.**
 
@@ -317,8 +322,6 @@ flowchart TD
 === SAVING RESULTS ===
 results/IMG_3841/tracking_results.pkl
 results/IMG_3841/points_3d_intermediate.pkl
-results/IMG_3841/visibility_stats.pkl
-results/IMG_3841/vggt_output/reconstruction.npz
 
   Landmarks: 3
   Electrodes: 24
@@ -333,7 +336,6 @@ Next: python scripts/script2.py
 
 **What gets saved:**
 - 3D positions for all landmarks and electrodes
-- Visibility statistics (how often each point was visible)
 - VGGT camera poses and reconstruction
 - Frame-by-frame tracking data
 
@@ -354,20 +356,7 @@ Next: python scripts/script2.py
 
 #### 2.2 Automatic Loading & Validation
 
-```
-=== VISIBILITY-BASED UNCERTAINTY CLASSIFICATION ===
-  Low uncertainty (≥50% visible):     18 electrodes
-  Moderate uncertainty (30-50%):       4 electrodes
-  High uncertainty (<30% visible):     2 electrodes
-  
-  Note: All electrodes included. Uncertainty reported as metadata.
-```
-
-**What this means:**
-- All electrodes are included (no exclusions!)
-- Uncertainty is based on visibility frequency across frames
-- Low visibility is normal for temporal/occipital electrodes (due to head geometry)
-- Uncertainty levels are saved as metadata in the JSON output
+The script loads the 3D points and verifies that all required landmarks are present.
 
 ---
 
@@ -427,7 +416,7 @@ results/
 
 ### Primary Output
 
-**`electrodes_3d.json`** - 3D coordinates with uncertainty metadata
+**`electrodes_3d.json`** - 3D coordinates in head-centered coordinate system
 
 ```json
 {
@@ -440,15 +429,12 @@ results/
   },
   "landmarks": {
     "NAS": {
-      "position": [0.0, 85.2, 12.3],
-      "visibility": {"percentage": 87.5}
+      "position": [0.0, 85.2, 12.3]
     }
   },
   "electrodes": {
     "E0": {
-      "position": [12.3, 45.6, 78.9],
-      "visibility": {"percentage": 85.2},
-      "uncertainty_level": "low"
+      "position": [12.3, 45.6, 78.9]
     }
   }
 }
@@ -479,15 +465,15 @@ Units:  Millimeters (mm)
 
 ---
 
-
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| **VGGT out of memory** | Reduce `MAX_VGGT_FRAMES` to 10 in Script1 |
-| **"LPA-RPA distance too small"** | Use different colored stickers |
+| **VGGT takes very long on CPU** | This is normal (30-60 min). Be patient or use GPU |
+| **VGGT out of memory (GPU)** | Reduce `MAX_VGGT_FRAMES` to 20 in script1.py |
+| **"LPA-RPA distance too small"** | Use different colored stickers for landmarks |
 | **"Missing landmarks"** | Re-run Script 1, click in 3-5 frames |
-| **High uncertainty** | Add more observations from different angles |
+| **Duplicate electrodes** | Already handled by 3D matching - click same electrode from different views |
 | **YOLO rejects all** | Lower `yolo_conf_accept` to 0.60 |
 | **Tracking looks wrong in review** | Press `R` to redo annotations |
 | **Asymmetric LPA-RPA** | Check landmark annotations; may have swapped LPA/RPA |

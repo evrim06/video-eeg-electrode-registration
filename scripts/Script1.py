@@ -1,13 +1,13 @@
 """
-SCRIPT 1: ANNOTATION & TRACKING (WITH QUALITY FILTERING)
+SCRIPT 1: ANNOTATION & TRACKING
 
 KEY INSIGHT: Head is STATIONARY, only camera moves.
              -> We can PROJECT 3D points to 2D instead of tracking in 2D.
 
-QUALITY FEATURES:
+FEATURES:
     - YOLO confidence filtering (80% threshold) - Only accept high-quality detections
-    - Visibility tracking - Monitor electrode visibility across frames
     - Multi-view triangulation - Better 3D accuracy from diverse angles
+    - Subprocess isolation for VGGT - Prevents memory crashes with 28+ frames
 """
 
 import sys
@@ -21,12 +21,13 @@ import shutil
 import gc
 import time
 import glob
+import subprocess
 from tqdm import tqdm
 from ultralytics import YOLO
 import colorsys
 
 
-print("SCRIPT 1: ANNOTATION & TRACKING (WITH QUALITY FILTERING)")
+print("SCRIPT 1: ANNOTATION & TRACKING")
 
 
 # CONFIGURATION
@@ -36,7 +37,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-print(f"Device: {DEVICE.upper()}")
+    print(f"Device: GPU (CUDA)")
+else:
+    print(f"Device: CPU (VGGT will take 30-60+ minutes - be patient)")
 
 # Path configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,9 +80,7 @@ def setup_video_output_dir(video_path):
         "temp_vggt_dir": temp_vggt_dir,
         "tracking_file": os.path.join(video_results_dir, "tracking_results.pkl"),
         "crop_file": os.path.join(video_results_dir, "crop_info.json"),
-        "masks_cache_file": os.path.join(video_results_dir, "masks_cache.pkl"),
         "points_3d_file": os.path.join(video_results_dir, "points_3d_intermediate.pkl"),
-        "visibility_file": os.path.join(video_results_dir, "visibility_stats.pkl"),
     }
     
     print(f"OUTPUT DIRECTORY SETUP")
@@ -105,7 +106,7 @@ LANDMARK_SHORT = {0: "NAS", 1: "LPA", 2: "RPA"}
 LANDMARK_COLORS = {0: (0, 0, 255), 1: (255, 0, 0), 2: (0, 255, 0)}
 
 VGGT_SIZE = 518
-MAX_VGGT_FRAMES = 15
+MAX_VGGT_FRAMES = 28  # Same for CPU and GPU - no timeout, will wait for completion
 
 CONFIG = {
     "frame_skip": 5,
@@ -117,6 +118,9 @@ CONFIG = {
     "projection_search_radius": 30,
     "min_triangulation_angle": 5.0,
     "visibility_depth_threshold": 0.1,
+    "click_match_radius": 20,       # Radius for matching clicks to existing 2D annotations
+    "projection_match_radius": 40,  # Radius for 2D projection matching (fallback only)
+    "match_3d_head_ratio": 0.12,    # 3D match threshold as ratio of ear-to-ear distance (~12%)
 }
 
 
@@ -293,26 +297,18 @@ def extract_frames(video_path, output_paths):
 
 
 def run_vggt_full(frames, crop_info, output_paths):
-    """Run VGGT on frames to get camera poses."""
+    """
+    Run VGGT on frames to get camera poses.
+    Uses subprocess isolation to prevent memory accumulation.
+    """
     print("\n=== RUNNING VGGT FOR CAMERA POSES ===")
     
     vggt_output_dir = output_paths["vggt_output_dir"]
     temp_vggt_dir = output_paths["temp_vggt_dir"]
     
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        total_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        used_mem = torch.cuda.memory_allocated() / 1e9
-        print(f"  GPU Memory: {used_mem:.1f}GB used / {total_mem:.1f}GB total")
-    
-    sys.path.insert(0, VGGT_REPO_PATH)
-    from vggt.models.vggt import VGGT
-    from vggt.utils.load_fn import load_and_preprocess_images
-    from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-    
     os.makedirs(vggt_output_dir, exist_ok=True)
+    
+    # Select frames for VGGT
     all_paths = sorted(glob.glob(os.path.join(FRAME_DIR, "*.jpg")))
     n = min(len(all_paths), MAX_VGGT_FRAMES)
     indices = np.linspace(0, len(all_paths)-1, n, dtype=int)
@@ -320,11 +316,12 @@ def run_vggt_full(frames, crop_info, output_paths):
     s1_indices = [int(os.path.basename(p).split('.')[0]) for p in selected]
     print(f"  Processing {n} frames for VGGT...")
     
+    # Prepare frames for VGGT (resize and pad to 518x518)
     if os.path.exists(temp_vggt_dir): 
         shutil.rmtree(temp_vggt_dir)
     os.makedirs(temp_vggt_dir)
     
-    processed = []
+    print("  Preparing frames...")
     for i, path in enumerate(selected):
         img = cv2.imread(path)
         h, w = img.shape[:2]
@@ -335,73 +332,28 @@ def run_vggt_full(frames, crop_info, output_paths):
         img = cv2.copyMakeBorder(img, pad_h, VGGT_SIZE-img.shape[0]-pad_h,
                                  pad_w, VGGT_SIZE-img.shape[1]-pad_w,
                                  cv2.BORDER_CONSTANT, value=(0,0,0))
-        out = os.path.join(temp_vggt_dir, f"{i:05d}.jpg")
-        cv2.imwrite(out, img)
-        processed.append(out)
+        cv2.imwrite(os.path.join(temp_vggt_dir, f"{i:05d}.jpg"), img)
     
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
+    # Save frame mapping for subprocess
+    np.save(os.path.join(temp_vggt_dir, "s1_indices.npy"), np.array(s1_indices))
     
-    checkpoint = os.path.join(CHECKPOINT_DIR, "vggt_model.pt")
-    model = VGGT()
-    if not os.path.exists(checkpoint):
-        print("  Downloading VGGT weights...")
-        state = torch.hub.load_state_dict_from_url(
-            "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt",
-            map_location="cpu", progress=True)
-        torch.save(state, checkpoint)
-        del state
-        gc.collect()
+    # Run VGGT in subprocess (isolated memory space)
+    print("  Launching VGGT subprocess...")
+    result = _run_vggt_subprocess(temp_vggt_dir, vggt_output_dir, CHECKPOINT_DIR, VGGT_REPO_PATH)
     
-    model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
-    model.to(DEVICE).eval()
+    if not result:
+        print("\n  ERROR: VGGT subprocess failed!")
+        print("  Check the error messages above.")
+        print("  Common issues: not enough RAM, missing dependencies")
+        sys.exit(1)
     
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
+    # Load results from subprocess
+    print("  Loading VGGT results...")
+    recon = np.load(os.path.join(vggt_output_dir, "reconstruction.npz"))
     
-    print("  Loading and preprocessing images...")
-    images = load_and_preprocess_images(processed).to(DEVICE)
-    print(f"  Image tensor shape: {images.shape}")
-
-    del processed  # Free up the list of image paths from CPU RAM
-    gc.collect()   # Force Python to clear unused memory
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache() # Clear unused VRAM on the GPU
-        
-    print(f"  Running VGGT inference (this may take a while)...")
-    
-    try:
-        with torch.no_grad():
-            if DEVICE == "cuda":
-                with torch.cuda.amp.autocast(dtype=torch.float16):
-                    preds = model(images)
-            else:
-                preds = model(images)
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            print("\n  ERROR: GPU out of memory!")
-            print("  Try reducing MAX_VGGT_FRAMES in the script (current: {})".format(MAX_VGGT_FRAMES))
-            print("  Or close other applications using GPU memory.")
-            del model, images
-            gc.collect()
-            if DEVICE == "cuda":
-                torch.cuda.empty_cache()
-            sys.exit(1)
-        else:
-            raise e
-    
-    print("  Processing VGGT outputs...")
-    E, K = pose_encoding_to_extri_intri(preds["pose_enc"], images.shape[-2:])
-    depth = preds["depth"].float().cpu().numpy().squeeze()
-    E = E.float().cpu().numpy().squeeze()
-    K = K.float().cpu().numpy().squeeze()
-    
-    del preds, images, model
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
+    depth = recon["depth"]
+    E = recon["extrinsics"]
+    K = recon["intrinsics"]
     
     if E.shape[-2:] == (3,4):
         E4 = np.zeros((len(s1_indices), 4, 4))
@@ -409,11 +361,6 @@ def run_vggt_full(frames, crop_info, output_paths):
             E4[i] = np.eye(4)
             E4[i,:3,:] = E[i]
         E = E4
-    
-    np.savez_compressed(os.path.join(vggt_output_dir, "reconstruction.npz"),
-                       depth=depth, extrinsics=E, intrinsics=K,
-                       frame_mapping_keys=np.arange(len(s1_indices)),
-                       frame_mapping_values=np.array(s1_indices))
     
     print(f"[OK] VGGT complete - {len(s1_indices)} frames processed")
     
@@ -426,6 +373,147 @@ def run_vggt_full(frames, crop_info, output_paths):
         "s1_indices": s1_indices,
     }
     return vggt_data
+
+
+def _run_vggt_subprocess(temp_vggt_dir, vggt_output_dir, checkpoint_dir, vggt_repo_path):
+    """
+    Run VGGT inference in a separate subprocess.
+    This ensures ALL memory (GPU + CPU) is released when done.
+    """
+    
+    # Create a temporary Python script for the subprocess
+    # Use repr() for paths to handle Windows backslashes properly
+    subprocess_script = f'''
+import sys
+import os
+import gc
+import numpy as np
+import torch
+import glob
+
+# Configuration - paths use repr() to handle Windows backslashes
+TEMP_DIR = {repr(temp_vggt_dir)}
+OUTPUT_DIR = {repr(vggt_output_dir)}
+CHECKPOINT_DIR = {repr(checkpoint_dir)}
+VGGT_REPO = {repr(vggt_repo_path)}
+
+# Device selection
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Disable TF32 for numerical precision (only affects CUDA)
+if DEVICE == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+print(f"  VGGT Subprocess started (Device: {{DEVICE}})")
+if DEVICE == "cpu":
+    print("  NOTE: Running on CPU - this will take several minutes")
+
+try:
+    # Import VGGT
+    sys.path.insert(0, VGGT_REPO)
+    from vggt.models.vggt import VGGT
+    from vggt.utils.load_fn import load_and_preprocess_images
+    from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+    
+    # Clear memory before loading model
+    gc.collect()
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        total_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        free_mem = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1e9
+        print(f"  GPU Memory: {{free_mem:.1f}}GB free / {{total_mem:.1f}}GB total")
+    
+    # Load checkpoint
+    checkpoint = os.path.join(CHECKPOINT_DIR, "vggt_model.pt")
+    model = VGGT()
+    
+    if not os.path.exists(checkpoint):
+        print("  Downloading VGGT weights (this may take a while)...")
+        state = torch.hub.load_state_dict_from_url(
+            "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt",
+            map_location="cpu", progress=True)
+        torch.save(state, checkpoint)
+        del state
+        gc.collect()
+    
+    print("  Loading VGGT model...")
+    model.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
+    model.to(DEVICE).eval()
+    
+    gc.collect()
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
+    # Load images
+    image_paths = sorted(glob.glob(os.path.join(TEMP_DIR, "*.jpg")))
+    print(f"  Loading {{len(image_paths)}} images...")
+    images = load_and_preprocess_images(image_paths).to(DEVICE)
+    print(f"  Image tensor shape: {{images.shape}}")
+    
+    gc.collect()
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
+    # Run inference
+    print("  Running VGGT inference...")
+    with torch.no_grad():
+        if DEVICE == "cuda":
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                preds = model(images)
+        else:
+            # CPU inference - no autocast
+            preds = model(images)
+    
+    print("  Processing outputs...")
+    E, K = pose_encoding_to_extri_intri(preds["pose_enc"], images.shape[-2:])
+    depth = preds["depth"].float().cpu().numpy().squeeze()
+    E = E.float().cpu().numpy().squeeze()
+    K = K.float().cpu().numpy().squeeze()
+    
+    # Load frame mapping
+    s1_indices = np.load(os.path.join(TEMP_DIR, "s1_indices.npy"))
+    
+    # Save results
+    np.savez_compressed(
+        os.path.join(OUTPUT_DIR, "reconstruction.npz"),
+        depth=depth, extrinsics=E, intrinsics=K,
+        frame_mapping_keys=np.arange(len(s1_indices)),
+        frame_mapping_values=s1_indices
+    )
+    
+    print("  VGGT subprocess completed successfully")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"  VGGT subprocess error: {{e}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+'''
+    
+    # Write subprocess script to temp file
+    script_path = os.path.join(temp_vggt_dir, "vggt_subprocess.py")
+    with open(script_path, "w") as f:
+        f.write(subprocess_script)
+    
+    # Run subprocess - no timeout, let it complete naturally
+    # Subprocess isolation still helps with memory cleanup after completion
+    print("  (No timeout - will run until complete)")
+    
+    try:
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=False  # Show output in real-time
+        )
+        return result.returncode == 0
+    except KeyboardInterrupt:
+        print("\n  Interrupted by user (Ctrl+C)")
+        return False
+    except Exception as e:
+        print(f"  ERROR: Failed to run subprocess: {e}")
+        return False
 
 
 # MODEL LOADING
@@ -547,6 +635,102 @@ class MultiViewAnnotator:
             if p3d is not None:
                 self.positions_3d[obj_id] = p3d
     
+    def get_head_size_3d(self):
+        """
+        Get the head size in VGGT 3D units based on landmark positions.
+        Returns the ear-to-ear distance (LPA to RPA).
+        """
+        if LANDMARK_LPA in self.positions_3d and LANDMARK_RPA in self.positions_3d:
+            return np.linalg.norm(
+                self.positions_3d[LANDMARK_LPA] - self.positions_3d[LANDMARK_RPA]
+            )
+        return None
+    
+    def find_closest_electrode_3d(self, u, v, s1_idx):
+        """
+        Find the closest existing electrode by comparing in 3D space.
+        
+        This is the PRIMARY matching method - more robust than 2D projection
+        because it handles cases where the same electrode clicked from different
+        viewpoints produces slightly different 3D estimates due to depth errors.
+        
+        The threshold is computed as a ratio of the head size (ear-to-ear distance),
+        so it adapts to the scale of the reconstruction.
+        
+        Args:
+            u, v: Click position in frame coordinates
+            s1_idx: Frame index
+        
+        Returns:
+            (obj_id, distance_3d) if found within threshold, else (None, inf)
+        """
+        # Unproject the click to 3D
+        click_3d = self.unproject_click(u, v, s1_idx)
+        if click_3d is None:
+            return None, float('inf')
+        
+        # Compute threshold based on head size
+        head_size = self.get_head_size_3d()
+        if head_size is not None:
+            max_dist_3d = head_size * CONFIG["match_3d_head_ratio"]
+        else:
+            # Fallback if landmarks not yet annotated (shouldn't happen normally)
+            max_dist_3d = 0.1
+        
+        closest_id = None
+        closest_dist = float('inf')
+        
+        for obj_id, pos_3d in self.positions_3d.items():
+            if obj_id < ELECTRODE_START_ID:
+                continue
+            
+            # Skip if this electrode already has an annotation in this frame
+            if obj_id in self.annotations_2d and s1_idx in self.annotations_2d[obj_id]:
+                continue
+            
+            # Compare in 3D space directly
+            dist_3d = np.linalg.norm(click_3d - pos_3d)
+            
+            if dist_3d < closest_dist:
+                closest_dist = dist_3d
+                closest_id = obj_id
+        
+        if closest_dist <= max_dist_3d:
+            return closest_id, closest_dist
+        return None, float('inf')
+    
+    def find_closest_projected_electrode(self, u, v, s1_idx, max_radius=None):
+        """
+        Find the closest existing electrode whose 3D position projects near (u, v).
+        
+        Returns:
+            (obj_id, distance) if found within max_radius, else (None, inf)
+        """
+        if max_radius is None:
+            max_radius = CONFIG["projection_match_radius"]
+        
+        closest_id = None
+        closest_dist = float('inf')
+        
+        for obj_id in self.positions_3d:
+            if obj_id < ELECTRODE_START_ID:
+                continue
+            
+            # Skip if this electrode already has an annotation in this frame
+            if obj_id in self.annotations_2d and s1_idx in self.annotations_2d[obj_id]:
+                continue
+            
+            proj, visible = self.project_to_frame(obj_id, s1_idx)
+            if visible and proj:
+                dist = np.sqrt((u - proj[0])**2 + (v - proj[1])**2)
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_id = obj_id
+        
+        if closest_dist <= max_radius:
+            return closest_id, closest_dist
+        return None, float('inf')
+    
     def annotate_landmarks(self):
         print("\n=== LANDMARK ANNOTATION ===")
         print("Navigate to frames where each landmark is clearly visible")
@@ -635,12 +819,15 @@ class MultiViewAnnotator:
                 u, v = click_pos
                 click_pos = None
                 clicked_existing = False
+                click_radius = CONFIG["click_match_radius"]
+                
+                # STEP 1: Check if clicking on existing 2D annotation in this frame (to remove)
                 for obj_id in list(self.annotations_2d.keys()):
                     if obj_id < ELECTRODE_START_ID:
                         continue
                     if s1_idx in self.annotations_2d[obj_id]:
                         eu, ev = self.annotations_2d[obj_id][s1_idx]
-                        if np.sqrt((u - eu)**2 + (v - ev)**2) < 20:
+                        if np.sqrt((u - eu)**2 + (v - ev)**2) < click_radius:
                             del self.annotations_2d[obj_id][s1_idx]
                             if len(self.annotations_2d[obj_id]) == 0:
                                 del self.annotations_2d[obj_id]
@@ -649,24 +836,37 @@ class MultiViewAnnotator:
                             clicked_existing = True
                             print(f"  Removed E{obj_id - ELECTRODE_START_ID} from frame {s1_idx}")
                             break
-                    elif obj_id in self.positions_3d:
-                        proj, visible = self.project_to_frame(obj_id, s1_idx)
-                        if visible and proj:
-                            if np.sqrt((u - proj[0])**2 + (v - proj[1])**2) < 20:
-                                self.annotations_2d[obj_id][s1_idx] = (u, v)
-                                clicked_existing = True
-                                print(f"  Added observation to E{obj_id - ELECTRODE_START_ID}")
-                                break
+                
+                # STEP 2: Check 3D distance (most robust - handles different viewpoints)
+                if not clicked_existing:
+                    closest_id, closest_dist_3d = self.find_closest_electrode_3d(u, v, s1_idx)
+                    if closest_id is not None:
+                        self.annotations_2d[closest_id][s1_idx] = (u, v)
+                        clicked_existing = True
+                        print(f"  Added observation to E{closest_id - ELECTRODE_START_ID} (3D match, dist={closest_dist_3d:.3f})")
+                
+                # STEP 3: Fall back to 2D projection matching
+                if not clicked_existing:
+                    closest_id, closest_dist_2d = self.find_closest_projected_electrode(u, v, s1_idx)
+                    if closest_id is not None:
+                        self.annotations_2d[closest_id][s1_idx] = (u, v)
+                        clicked_existing = True
+                        print(f"  Added observation to E{closest_id - ELECTRODE_START_ID} (2D match, dist={closest_dist_2d:.1f}px)")
+                
+                # STEP 4: Create new electrode if no match
                 if not clicked_existing:
                     new_id = self.next_electrode_id
                     self.next_electrode_id += 1
                     self.annotations_2d[new_id] = {s1_idx: (u, v)}
                     print(f"  Added E{new_id - ELECTRODE_START_ID} at frame {s1_idx}")
+                
                 self.update_3d_positions()
+                
             elif k == 32 and yolo is not None:
                 res = yolo.predict(img, conf=CONFIG["yolo_conf"], verbose=False)
                 if res and res[0].boxes is not None:
                     added = 0
+                    merged = 0
                     rejected_low_conf = 0
                     confidences = res[0].boxes.conf.cpu().numpy()
                     
@@ -677,6 +877,8 @@ class MultiViewAnnotator:
                             continue
                         
                         cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                        
+                        # Check if near existing 2D annotation in this frame
                         is_dup = False
                         for obj_id in self.annotations_2d:
                             if obj_id < ELECTRODE_START_ID:
@@ -686,21 +888,35 @@ class MultiViewAnnotator:
                                 if np.sqrt((cx - eu)**2 + (cy - ev)**2) < 25:
                                     is_dup = True
                                     break
-                            elif obj_id in self.positions_3d:
-                                proj, _ = self.project_to_frame(obj_id, s1_idx)
-                                if proj and np.sqrt((cx - proj[0])**2 + (cy - proj[1])**2) < 25:
-                                    is_dup = True
-                                    break
-                        if not is_dup:
+                        
+                        if is_dup:
+                            continue
+                        
+                        # Check 3D distance first (handles different viewpoints)
+                        closest_id, closest_dist_3d = self.find_closest_electrode_3d(cx, cy, s1_idx)
+                        if closest_id is not None:
+                            self.annotations_2d[closest_id][s1_idx] = (float(cx), float(cy))
+                            merged += 1
+                            continue
+                        
+                        # Fall back to 2D projection matching
+                        closest_id, closest_dist_2d = self.find_closest_projected_electrode(cx, cy, s1_idx)
+                        if closest_id is not None:
+                            self.annotations_2d[closest_id][s1_idx] = (float(cx), float(cy))
+                            merged += 1
+                        else:
+                            # Create new electrode
                             new_id = self.next_electrode_id
                             self.next_electrode_id += 1
                             self.annotations_2d[new_id] = {s1_idx: (float(cx), float(cy))}
                             added += 1
                     
+                    msg = f"  Auto-detected: {added} new"
+                    if merged > 0:
+                        msg += f", {merged} merged with existing"
                     if rejected_low_conf > 0:
-                        print(f"  Auto-detected {added} electrodes (rejected {rejected_low_conf} low-confidence <{CONFIG['yolo_conf_accept']*100:.0f}%)")
-                    else:
-                        print(f"  Auto-detected {added} new electrodes")
+                        msg += f" (rejected {rejected_low_conf} low-conf <{CONFIG['yolo_conf_accept']*100:.0f}%)"
+                    print(msg)
                     self.update_3d_positions()
             elif k == ord('q'):
                 break
@@ -807,24 +1023,14 @@ class MultiViewAnnotator:
 def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
     """
     Generate 2D tracking data by projecting 3D positions to each frame.
-    Tracks visibility frequency for each electrode.
+    Used for review visualization.
     """
-    print("\n=== GENERATING TRACKING FROM 3D PROJECTIONS (WITH VISIBILITY TRACKING) ===")
+    print("\n=== GENERATING TRACKING FROM 3D PROJECTIONS ===")
     
     tracking = {}
-    masks_cache = {}
-    visibility_stats = {}
     
     img0 = cv2.imread(os.path.join(FRAME_DIR, frames[0]))
     img_h, img_w = img0.shape[:2]
-    
-    # Initialize visibility counters
-    for obj_id in positions_3d.keys():
-        visibility_stats[obj_id] = {
-            "visible_frames": 0, 
-            "total_frames": len(frames),
-            "frame_list": []
-        }
     
     for s1_idx in tqdm(range(len(frames)), desc="Projecting"):
         vggt_idx = vggt_data["s1_to_vggt"].get(s1_idx, None)
@@ -861,7 +1067,6 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
             extrinsic = vggt_data["extrinsics"][vggt_idx]
         
         frame_tracking = {}
-        frame_masks = {}
         
         for obj_id, pos_3d in positions_3d.items():
             # Project to 2D
@@ -877,71 +1082,14 @@ def generate_tracking_from_3d(frames, vggt_data, crop_info, positions_3d):
             if not (0 <= u_s1 < img_w and 0 <= v_s1 < img_h):
                 continue
             
-            # Visibility check using depth (if available)
-            is_visible = True
-            if vggt_idx is not None:
-                depth_map = vggt_data["depths"][vggt_idx]
-                H, W = depth_map.shape
-                
-                if 0 <= int(v_vggt) < H and 0 <= int(u_vggt) < W:
-                    P_world = np.array([pos_3d[0], pos_3d[1], pos_3d[2], 1.0])
-                    P_cam = extrinsic @ P_world
-                    expected_depth = P_cam[2]
-                    actual_depth = depth_map[int(v_vggt), int(u_vggt)]
-                    
-                    if actual_depth > 0:
-                        relative_diff = abs(expected_depth - actual_depth) / max(expected_depth, 0.001)
-                        if relative_diff > 0.3:  # Occluded
-                            is_visible = False
-            
-            if is_visible:
-                frame_tracking[obj_id] = (u_s1, v_s1)
-                visibility_stats[obj_id]["visible_frames"] += 1
-                visibility_stats[obj_id]["frame_list"].append(s1_idx)
+            frame_tracking[obj_id] = (u_s1, v_s1)
         
         if frame_tracking:
             tracking[s1_idx] = frame_tracking
-            masks_cache[s1_idx] = frame_masks
     
-    print(f" Generated tracking for {len(tracking)} frames")
+    print(f"  Generated tracking for {len(tracking)} frames")
     
-    # Print visibility statistics
-    print("\n=== VISIBILITY STATISTICS ===")
-    all_obj_ids = sorted(list(visibility_stats.keys()))
-    
-    landmark_ids = [i for i in all_obj_ids if i < NUM_LANDMARKS]
-    electrode_ids = [i for i in all_obj_ids if i >= ELECTRODE_START_ID]
-    
-    print("\nLandmarks:")
-    for obj_id in landmark_ids:
-        vis = visibility_stats[obj_id]
-        pct = 100.0 * vis["visible_frames"] / vis["total_frames"]
-        print(f"  {LANDMARK_SHORT.get(obj_id, f'L{obj_id}')}: {vis['visible_frames']}/{vis['total_frames']} frames ({pct:.1f}%)")
-    
-    print(f"\nElectrodes:")
-    low_visibility_electrodes = []
-    for obj_id in electrode_ids:
-        vis = visibility_stats[obj_id]
-        pct = 100.0 * vis["visible_frames"] / vis["total_frames"]
-        elec_name = f"E{obj_id - ELECTRODE_START_ID}"
-        
-        if pct < 30:
-            low_visibility_electrodes.append((obj_id, pct))
-            status = "LOW"
-        elif pct < 50:
-            status = "FAIR"
-        else:
-            status = "GOOD"
-        
-        print(f"  {elec_name}: {vis['visible_frames']}/{vis['total_frames']} frames ({pct:.1f}%) {status}")
-    
-    if low_visibility_electrodes:
-        print(f"\nWARNING: {len(low_visibility_electrodes)} electrode(s) have <30% visibility:")
-        for obj_id, pct in low_visibility_electrodes:
-            print(f"     E{obj_id - ELECTRODE_START_ID}: {pct:.1f}%")
-        print("   These will be flagged for potential exclusion in Script 2.")
-    
-    return tracking, masks_cache, visibility_stats
+    return tracking
 
 
 # REVIEW
@@ -1008,38 +1156,24 @@ def review_tracking(frames, tracking, positions_3d, vggt_data, crop_info):
 # SAVE RESULTS
 
 
-def save_results(tracking, masks_cache, positions_3d, visibility_stats, output_paths):
-    """Save all results to video-specific directory."""
+def save_results(tracking, positions_3d, output_paths):
+    """Save tracking and 3D positions to video-specific directory."""
     print("\n=== SAVING RESULTS ===")
     
     tracking_file = output_paths["tracking_file"]
-    masks_cache_file = output_paths["masks_cache_file"]
     points_3d_file = output_paths["points_3d_file"]
-    visibility_file = output_paths["visibility_file"]
     
     with open(tracking_file, "wb") as f:
         pickle.dump(tracking, f)
-    print(f" {tracking_file}")
-    
-    with open(masks_cache_file, "wb") as f:
-        pickle.dump(masks_cache, f)
-    print(f" {masks_cache_file}")
+    print(f"  {tracking_file}")
     
     with open(points_3d_file, "wb") as f:
         pickle.dump(positions_3d, f)
-    print(f" {points_3d_file}")
-    
-    with open(visibility_file, "wb") as f:
-        pickle.dump(visibility_stats, f)
-    print(f" {visibility_file}")
+    print(f"  {points_3d_file}")
     
     # Statistics
-    all_ids = set()
-    for frame_data in tracking.values():
-        all_ids.update(frame_data.keys())
-    
-    n_landmarks = sum(1 for i in all_ids if isinstance(i, int) and i < NUM_LANDMARKS)
-    n_electrodes = sum(1 for i in all_ids if isinstance(i, int) and i >= ELECTRODE_START_ID)
+    n_landmarks = sum(1 for i in positions_3d.keys() if isinstance(i, int) and i < NUM_LANDMARKS)
+    n_electrodes = sum(1 for i in positions_3d.keys() if isinstance(i, int) and i >= ELECTRODE_START_ID)
     
     print(f"\n  Landmarks: {n_landmarks}")
     print(f"  Electrodes: {n_electrodes}")
@@ -1073,8 +1207,8 @@ def main():
         annotator.annotate_landmarks()
         annotator.annotate_electrodes(yolo)
         
-        # Step 5: Generate tracking with visibility stats
-        tracking, masks_cache, visibility_stats = generate_tracking_from_3d(
+        # Step 5: Generate tracking for review
+        tracking = generate_tracking_from_3d(
             frames, vggt_data, crop_info, annotator.positions_3d
         )
         
@@ -1084,7 +1218,7 @@ def main():
         print("\n  Restarting annotation...\n")
     
     # Step 7: Save
-    save_results(tracking, masks_cache, annotator.positions_3d, visibility_stats, output_paths)
+    save_results(tracking, annotator.positions_3d, output_paths)
     
     print("SCRIPT 1 COMPLETE!")
     print(f"Results saved to: {output_paths['results_dir']}")

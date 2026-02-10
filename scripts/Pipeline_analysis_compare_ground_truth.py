@@ -409,7 +409,7 @@ def main():
         x_pos = np.random.normal(i, 0.04, size=len(data))
         ax.scatter(x_pos, data, alpha=0.6, s=30, color='darkblue', edgecolors='black', linewidth=0.5, zorder=3)
     
-    ax.set_title("Scanner Reliability (Internal Consistency)", fontsize=14, fontweight='bold')
+    ax.set_title("Digitizer Reliability (Internal Consistency)", fontsize=14, fontweight='bold')
     ax.set_ylabel("Deviation from mean (mm)", fontsize=12)
     ax.set_xlabel("Recording Session", fontsize=12)
     ax.grid(axis='y', alpha=0.3)
@@ -428,7 +428,7 @@ def main():
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, 'scanner_reliability_boxplot.png'), dpi=150)
     plt.close()
-    print("Scanner reliability box plot saved")
+    print("Digitizer reliability box plot saved")
 
     # Plot 2: Pipeline Reliability BOX PLOT with individual points
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -488,7 +488,7 @@ def main():
     
     # Create box plot without showing fliers
     bp = ax.boxplot([all_scanner_errors, all_pipeline_errors], 
-                    labels=['Scanner (Digitizer)', 'Pipeline (Video)'],
+                    labels=['Digitizer', 'Pipeline (Video)'],
                     patch_artist=True,
                     showmeans=True, meanline=True, showfliers=False,
                     boxprops=dict(alpha=0.6),
@@ -510,7 +510,7 @@ def main():
                color='darkred', edgecolors='black', linewidth=0.3, zorder=3)
     
     ax.set_ylabel('Deviation from Mean (mm)', fontsize=12)
-    ax.set_title('Repeatability Comparison: Per-Electrode Distribution', fontsize=14, fontweight='bold')
+    ax.set_title('Reliability Comparison: Per-Electrode Distribution', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     
     # Add visual line annotation
@@ -543,7 +543,7 @@ def main():
     
     # Create box plot without showing fliers
     bp = ax.boxplot([scanner_recording_means, pipeline_recording_means], 
-                    labels=['Scanner (Digitizer)', 'Pipeline (Video)'],
+                    labels=['Digitizer', 'Pipeline (Video)'],
                     patch_artist=True,
                     showmeans=True, meanline=True, showfliers=False,
                     boxprops=dict(alpha=0.6),
@@ -565,7 +565,7 @@ def main():
                color='darkred', edgecolors='black', linewidth=0.5, zorder=3)
     
     ax.set_ylabel('Average Deviation per Recording (mm)', fontsize=12)
-    ax.set_title('Repeatability Comparison: Per-Recording Consistency', fontsize=14, fontweight='bold')
+    ax.set_title('Reliability Comparison: Per-Recording Consistency', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     
     # Add visual line annotation
@@ -582,11 +582,11 @@ def main():
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, 'repeatability_comparison_per_recording.png'), dpi=150)
     plt.close()
-    print("✓ Repeatability comparison (per-recording) saved")
+    print(" Realiability comparison (per-recording) saved")
 
     # Plot 4: Accuracy Head Map (use standard montage or scanner positions)
     plot_top_view_head_map(acc_errors, plot_positions, OUTPUT_DIR, 
-                           title="Inter-Method Accuracy (Pipeline Mean vs Scanner Mean)", 
+                           title="Inter-Method Accuracy (Pipeline Mean vs Digitizer Mean)", 
                            filename="accuracy_head_map.png")
     print("Accuracy head map saved")
 
@@ -600,10 +600,10 @@ def main():
     # Plot 6: Scanner Variability Head Map (use standard montage or scanner positions)
     s_vars = {k: v['mean_distance'] for k, v in s_variability.items() if k not in LANDMARKS}
     plot_top_view_head_map(s_vars, plot_positions, OUTPUT_DIR, 
-                           title="Scanner Internal Variability", 
+                           title="Digitizer Internal Variability", 
                            filename="scanner_variability_map.png",
                            vmax=5)
-    print("Scanner variability map saved")
+    print("Digitizer variability map saved")
 
     # Print numerical summary
     print("ERROR CALCULATION SUMMARY")
