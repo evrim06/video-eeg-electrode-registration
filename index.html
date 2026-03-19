@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smartphone Video-Based EEG Electrode Localization</title>
+  <meta name="description" content="An open-source pipeline for EEG electrode localization using smartphone video recordings.">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@300;400;500;600;700&family=Noto+Serif:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Academicons & Font Awesome -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <style>
+    :root {
+      --uol-blue: #003E6B;
+      --uol-accent: #00ABD9;
+      --uol-orange: #EE7100;
+      --uol-purple: #666699;
+      --text-primary: #2c3e50;
+      --text-secondary: #555;
+      --bg-light: #f8f9fa;
+      --bg-section: #f0f4f8;
+      --max-width: 960px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Noto Sans', sans-serif;
+      color: var(--text-primary);
+      line-height: 1.7;
+      background: #fff;
+    }
+
+    /* ---- Hero ---- */
+    .hero {
+      text-align: center;
+      padding: 60px 20px 40px;
+      background: linear-gradient(180deg, var(--bg-section) 0%, #fff 100%);
+    }
+
+    .hero h1 {
+      font-family: 'Noto Serif', serif;
+      font-size: 2.6rem;
+      font-weight: 600;
+      color: var(--uol-blue);
+      max-width: 800px;
+      margin: 0 auto 16px;
+      line-height: 1.25;
+    }
+
+    .authors {
+      font-size: 1.15rem;
+      margin-bottom: 6px;
+      color: var(--text-primary);
+    }
+
+    .authors a {
+      color: var(--uol-accent);
+      text-decoration: none;
+    }
+    .authors a:hover { text-decoration: underline; }
+
+    .affiliation {
+      font-size: 0.95rem;
+      color: var(--text-secondary);
+      margin-bottom: 30px;
+    }
+
+    .affiliation img {
+      height: 50px;
+      vertical-align: middle;
+      margin-left: 8px;
+    }
+
+    /* ---- Link buttons ---- */
+    .link-buttons {
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    .link-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 22px;
+      border-radius: 24px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      text-decoration: none;
+      color: #fff;
+      background: var(--uol-blue);
+      transition: background 0.2s, transform 0.15s;
+    }
+    .link-btn:hover {
+      background: var(--uol-accent);
+      transform: translateY(-1px);
+    }
+    .link-btn i, .link-btn .ai { font-size: 1.1rem; }
+
+    /* ---- Sections ---- */
+    .section {
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 50px 24px;
+    }
+
+    .section-alt {
+      background: var(--bg-section);
+    }
+
+    .section-alt .section {
+      padding-top: 50px;
+      padding-bottom: 50px;
+    }
+
+    h2 {
+      font-family: 'Noto Serif', serif;
+      font-size: 1.8rem;
+      font-weight: 600;
+      color: var(--uol-blue);
+      margin-bottom: 20px;
+      text-align: center;
+    }
+
+    h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: var(--uol-blue);
+      margin-top: 28px;
+      margin-bottom: 10px;
+    }
+
+    p {
+      margin-bottom: 16px;
+      color: var(--text-secondary);
+    }
+
+    /* ---- Pipeline Steps ---- */
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+      margin-top: 30px;
+    }
+
+    @media (max-width: 700px) {
+      .pipeline-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .pipeline-step {
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px 16px;
+      text-align: center;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+      transition: transform 0.2s;
+      position: relative;
+    }
+    .pipeline-step:hover { transform: translateY(-3px); }
+
+    .step-number {
+      position: absolute;
+      top: -12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--uol-accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.8rem;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pipeline-step img {
+      width: 100%;
+      max-height: 140px;
+      object-fit: contain;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+
+    .pipeline-step .placeholder-img {
+      width: 100%;
+      height: 120px;
+      background: var(--bg-section);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: var(--uol-accent);
+    }
+
+    .pipeline-step h4 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--uol-blue);
+      margin-bottom: 6px;
+    }
+
+    .pipeline-step p {
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    /* ---- Results grid ---- */
+    .results-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 24px;
+    }
+
+    @media (max-width: 700px) {
+      .results-grid { grid-template-columns: 1fr; }
+    }
+
+    .result-card {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    }
+
+    .result-card img {
+      width: 100%;
+      display: block;
+    }
+
+    .result-card .caption {
+      padding: 14px 18px;
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .result-card .caption strong {
+      color: var(--text-primary);
+    }
+
+    .result-full {
+      grid-column: 1 / -1;
+    }
+
+    /* ---- Stats highlights ---- */
+    .stats-row {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      flex-wrap: wrap;
+      margin: 30px 0;
+    }
+
+    .stat-item {
+      text-align: center;
+    }
+
+    .stat-value {
+      font-family: 'Noto Serif', serif;
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: var(--uol-blue);
+    }
+
+    .stat-label {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* ---- Key findings ---- */
+    .findings {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-top: 24px;
+    }
+
+    @media (max-width: 700px) {
+      .findings { grid-template-columns: 1fr; }
+    }
+
+    .finding-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+      border-left: 4px solid var(--uol-accent);
+    }
+
+    .finding-card.orange { border-left-color: var(--uol-orange); }
+    .finding-card.purple { border-left-color: var(--uol-purple); }
+    .finding-card.green  { border-left-color: #4CAF50; }
+
+    .finding-card h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--uol-blue);
+      margin-bottom: 8px;
+    }
+
+    .finding-card p {
+      font-size: 0.9rem;
+      margin: 0;
+    }
+
+    /* ---- Demo videos ---- */
+    .demo-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 30px;
+    }
+
+    @media (max-width: 700px) {
+      .demo-grid { grid-template-columns: 1fr; }
+    }
+
+    .demo-card {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    }
+
+    .demo-card video {
+      width: 100%;
+      display: block;
+      background: #000;
+    }
+
+    .demo-card .caption {
+      padding: 14px 18px;
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .demo-card .caption strong {
+      color: var(--text-primary);
+    }
+
+    .demo-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+    }
+
+    .demo-pair video,
+    .demo-pair img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .demo-label {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+
+    .demo-label.input  { background: var(--uol-accent); color: #fff; }
+    .demo-label.output { background: var(--uol-orange); color: #fff; }
+
+    /* ---- BibTeX ---- */
+    .bibtex-box {
+      background: var(--uol-blue);
+      color: #c8dce8;
+      padding: 20px 24px;
+      border-radius: 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    .bibtex-box .copy-btn {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .bibtex-box .copy-btn:hover { background: rgba(255,255,255,0.25); }
+
+    /* ---- Footer ---- */
+    footer {
+      text-align: center;
+      padding: 40px 20px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      border-top: 1px solid #e8e8e8;
+    }
+
+    footer a { color: var(--uol-accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ---- Utility ---- */
+    .text-center { text-align: center; }
+    .mt-1 { margin-top: 10px; }
+    .mt-2 { margin-top: 20px; }
+    .mt-3 { margin-top: 30px; }
+    .separator {
+      width: 60px;
+      height: 3px;
+      background: var(--uol-accent);
+      margin: 0 auto 30px;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ==================== HERO ==================== -->
+<div class="hero">
+  <h1>Smartphone Video-Based EEG Electrode Localization</h1>
+
+  <div class="authors">
+    <strong>Evrim Evirgen</strong>
+  </div>
+
+  <div class="affiliation">
+    Neuropsychology Lab, Department of Psychology, School of Medicine and Health<br>
+    Carl von Ossietzky Universität Oldenburg
+    <!-- If you have the UOL logo, add: <img src="static/images/uol_logo.png" alt="UOL"> -->
+  </div>
+
+  <div class="link-buttons">
+    <a class="link-btn" href="https://github.com/evrim06/video-eeg-electrode-registration">
+      <i class="fab fa-github"></i> Code
+    </a>
+    <a class="link-btn" href="https://github.com/evrim06/video-eeg-electrode-registration/blob/main/README.md">
+      <i class="fas fa-book"></i> Documentation
+    </a>
+    <!-- Uncomment when available:
+    <a class="link-btn" href="#">
+      <i class="fas fa-file-pdf"></i> Paper
+    </a>
+    <a class="link-btn" href="#">
+      <i class="fas fa-desktop"></i> Demo
+    </a>
+    -->
+  </div>
+</div>
+
+
+<!-- ==================== ABSTRACT ==================== -->
+<div class="section">
+  <h2>Abstract</h2>
+  <div class="separator"></div>
+  <p>
+    Accurate localization of EEG electrodes is essential for reliable source analysis.
+    A 5 mm sensor shift can introduce 2–12 mm of source localization error.
+    Traditional approaches such as electromagnetic digitizers and structured-light 3D scanners
+    are reliable but require expensive equipment (€5,000–€20,000) or complex setup.
+  </p>
+  <p>
+    We present an <strong>open-source pipeline</strong> that replaces dedicated digitization hardware
+    with a smartphone video recording. The pipeline uses
+    <strong>VGGT</strong> (Visual Geometry Grounded Transformer) for 3D reconstruction,
+    <strong>YOLOv8</strong> for electrode detection, and depth-based unprojection
+    to localize EEG electrode positions in 3D space — requiring only a ~45-second
+    smartphone video and a single physical head measurement.
+  </p>
+</div>
+
+
+<!-- ==================== METHOD ==================== -->
+<div class="section-alt">
+  <div class="section">
+    <h2>Pipeline</h2>
+    <div class="separator"></div>
+    <p class="text-center">
+      The pipeline processes a smartphone video in four steps to produce
+      3D electrode coordinates in a head-centered coordinate system.
+    </p>
+
+    <div class="pipeline-grid">
+      <div class="pipeline-step">
+        <div class="step-number">1</div>
+        <div class="placeholder-img"><i class="fas fa-mobile-alt"></i></div>
+        <!-- Replace with: <img src="static/images/step1_recording.png" alt="Video Recording"> -->
+        <h4>Video Recording</h4>
+        <p>Mark landmarks, record ~45 sec with a 1080p smartphone camera.</p>
+      </div>
+
+      <div class="pipeline-step">
+        <div class="step-number">2</div>
+        <div class="placeholder-img"><i class="fas fa-cube"></i></div>
+        <!-- Replace with: <img src="static/images/step2_vggt.png" alt="VGGT Reconstruction"> -->
+        <h4>3D Reconstruction</h4>
+        <p>VGGT extracts 3D point cloud, camera poses, and depth maps from 28 frames.</p>
+      </div>
+
+      <div class="pipeline-step">
+        <div class="step-number">3</div>
+        <div class="placeholder-img"><i class="fas fa-crosshairs"></i></div>
+        <!-- Replace with: <img src="static/images/step3_detection.png" alt="Electrode Detection"> -->
+        <h4>Electrode Detection</h4>
+        <p>YOLOv8 auto-detection with 80% confidence filter + manual correction.</p>
+      </div>
+
+      <div class="pipeline-step">
+        <div class="step-number">4</div>
+        <img src="static/images/3d_visualization_top (1).png" alt="Head Coordinate Transform">
+        <h4>Head Coordinate Transform</h4>
+        <p>Landmark alignment, real-world scaling, and 3D coordinate extraction.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== DEMO ==================== -->
+<div class="section">
+  <h2>Demo: Input → Output</h2>
+  <div class="separator"></div>
+  <p class="text-center">
+    Smartphone video input (left) and the resulting 3D electrode localization (right).
+  </p>
+
+  <div class="demo-grid">
+    <!-- DEMO 1 -->
+    <div class="demo-card">
+      <div class="demo-pair">
+        <div style="height:220px;background:#e8edf2;display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:0.85rem;">
+          demo1_input.mp4
+        </div>
+        <div style="height:220px;background:#dfe6ed;display:flex;align-items:center;justify-content:center;color:var(--uol-orange);font-size:0.85rem;">
+          demo1_output.mp4
+        </div>
+      </div>
+      <div class="caption">
+        <span class="demo-label input">Input</span>
+        <span class="demo-label output">Output</span>
+        <strong>Well-reconstructed recording.</strong>
+        Smooth camera motion with translational movement provides VGGT
+        sufficient parallax for accurate depth estimation. Mean error: ~5 mm.
+      </div>
+    </div>
+
+    <!-- DEMO 2 -->
+    <div class="demo-card">
+      <div class="demo-pair">
+        <div style="height:220px;background:#e8edf2;display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:0.85rem;">
+          demo2_input.mp4
+        </div>
+        <div style="height:220px;background:#dfe6ed;display:flex;align-items:center;justify-content:center;color:var(--uol-orange);font-size:0.85rem;">
+          demo2_output.mp4
+        </div>
+      </div>
+      <div class="caption">
+        <span class="demo-label input">Input</span>
+        <span class="demo-label output">Output</span>
+        <strong>Poor reconstruction example.</strong>
+        Rotational camera motion deprives VGGT of translational parallax,
+        resulting in depth estimation errors and distorted 3D output.
+      </div>
+    </div>
+  </div>
+
+  <p class="text-center mt-2" style="font-size:0.85rem; color:#999;">
+    Output visualizations rendered using the pipeline's 3D head coordinate system.
+  </p>
+</div>
+
+
+<!-- ==================== KEY RESULTS ==================== -->
+<div class="section">
+  <h2>Validation Results</h2>
+  <div class="separator"></div>
+
+  <p class="text-center">
+    Validated on a styrofoam head model with a 24-channel EEG cap:<br>
+    10 digitizer recordings (ground truth) vs. 10 smartphone video recordings.
+  </p>
+
+  <!-- Stats highlights -->
+  <div class="stats-row">
+    <div class="stat-item">
+      <div class="stat-value">4.82 mm</div>
+      <div class="stat-label">Mean accuracy error</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">0.998</div>
+      <div class="stat-label">ICC between methods</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">p = 0.527</div>
+      <div class="stat-label">Repeatability (Wilcoxon)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">0.997</div>
+      <div class="stat-label">ICC within pipeline</div>
+    </div>
+  </div>
+
+  <!-- Finding cards -->
+  <div class="findings">
+    <div class="finding-card orange">
+      <h4><i class="fas fa-bullseye"></i> &nbsp;Accuracy</h4>
+      <p>
+        ICC showed excellent overall agreement between methods (0.998),
+        confirming that the pipeline captures the correct electrode layout.
+        The mean positional error of 4.82 mm reflects a small remaining offset,
+        likely caused by depth estimation errors during rotational camera movement.
+      </p>
+    </div>
+
+    <div class="finding-card purple">
+      <h4><i class="fas fa-sync-alt"></i> &nbsp;Repeatability</h4>
+      <p>
+        The pipeline reproduces electrode positions as consistently as the
+        digitizer (Wilcoxon p = 0.527). Within-method ICC: digitizer 0.999,
+        pipeline 0.997 — both excellent.
+      </p>
+    </div>
+
+    <div class="finding-card">
+      <h4><i class="fas fa-exclamation-triangle"></i> &nbsp;Recording Quality</h4>
+      <p>
+        3 of 10 recordings produced poor reconstructions (40–48 mm error)
+        due to rotational camera motion, which deprives VGGT of the
+        translational parallax needed for depth estimation.
+      </p>
+    </div>
+
+    <div class="finding-card green">
+      <h4><i class="fas fa-lightbulb"></i> &nbsp;Conclusion</h4>
+      <p>
+        These results support the pipeline as a promising proof of concept
+        for low-cost electrode localization, with recording quality and
+        depth estimation identified as key areas for further improvement.
+      </p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== FIGURES ==================== -->
+<div class="section-alt">
+  <div class="section">
+    <h2>Visualizations</h2>
+    <div class="separator"></div>
+
+    <p class="text-center">
+      Replace the placeholder images below with your actual figures.
+      Place them in a <code>static/images/</code> folder in your repo.
+    </p>
+
+    <div class="results-grid">
+      <div class="result-card">
+       <img src="static/images/accuracy_headmap.png" alt="Accuracy Head Map">
+        <div class="caption">
+          <strong>Inter-Method Accuracy.</strong>
+          Per-electrode Euclidean distance between pipeline and digitizer mean positions.
+          Central and posterior electrodes show lowest errors; frontal and temporal sites
+          show higher errors due to limited camera coverage.
+        </div>
+      </div>
+
+      <div class="result-card">
+        <img src="static/images/accuracy_boxplot.png" alt="Accuracy Boxplot">
+        <div class="caption">
+          <strong>Accuracy Distribution.</strong>
+          Mean error 4.82 ± 1.67 mm across 24 electrodes (well-reconstructed recordings only).
+        </div>
+      </div>
+
+      <div class="result-card">
+        <img src="static/images/repeatability_recording_boxplot.png" alt="Recording Repeatability">
+        <div class="caption">
+          <strong>Intra-Method Repeatability (Per-Recording).</strong>
+          Each dot represents one recording session's mean error. Pipeline 2.7 mm vs. digitizer 2.6 mm.
+        </div>
+      </div>
+
+      <div class="result-card">
+        <div style="height:260px;background:var(--bg-section);display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:1rem;">
+          <img src="static/images/repeatability_electrode_boxplot.png" alt="Electrode Repeatability">
+        <div class="caption">
+          <strong>Intra-Method Repeatability (Per-Electrode).</strong>
+          Each dot represents one electrode from one recording. Full spread of individual observations.
+        </div>
+      </div>
+
+      <div class="result-card result-full">
+          <img src="static/images/variability_headmap_comparison.png" alt="Variability Comparisony">
+        <div class="caption">
+          <strong>Repeatability Comparison (Spatial Variance).</strong>
+          Side-by-side comparison of digitizer vs. pipeline internal consistency.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== BIBTEX ==================== -->
+<div class="section">
+  <h2>BibTeX</h2>
+  <div class="separator"></div>
+
+  <div class="bibtex-box">
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('pre').textContent)">
+      <i class="fas fa-copy"></i> Copy
+    </button>
+<pre>@software{evirgen2025video_eeg,
+  title   = {Video-based EEG Electrode Registration Pipeline},
+  author  = {Evrim Evirgen},
+  year    = {2025},
+  url     = {https://github.com/evrim06/video-eeg-electrode-registration}
+}</pre>
+  </div>
+</div>
+
+
+<!-- ==================== REFERENCES ==================== -->
+<div class="section-alt">
+  <div class="section">
+    <h2>References</h2>
+    <div class="separator"></div>
+    <p style="font-size:0.88rem; line-height:1.8;">
+      Clausner, T., Dalal, S. S., &amp; Crespo-García, M. (2017). Photogrammetry-based head digitization for rapid and accurate localization of EEG electrodes and MEG fiducial markers. <em>Frontiers in Neuroscience</em>, 11, 264.<br>
+      Homölle, S., &amp; Oostenveld, R. (2019). Using a structured-light 3D scanner to improve EEG source modeling with more accurate electrode positions. <em>Journal of Neuroscience Methods</em>, 326, 108378.<br>
+      Mazzonetto, I., Castellaro, M., Canale, R. J., &amp; Bhatt, S. (2022). Smartphone video-based photogrammetry for the 3D localization of EEG and fNIRS sensors. <em>Scientific Reports</em>, 12, 10862.<br>
+      Shirazi, S. Y., &amp; Huang, H. J. (2019). More reliable EEG electrode digitizing methods can reduce source estimation uncertainty. <em>Frontiers in Neuroscience</em>, 13, 1159.<br>
+      Taberna, G. A., Marino, M., Ganzetti, M., &amp; Mantini, D. (2019). Spatial localization of EEG electrodes using 3D scanning. <em>Journal of Neural Engineering</em>, 16(2), 026020.<br>
+      Wang, J., Chen, M., Karaev, N., Vedaldi, A., Rupprecht, C., &amp; Novotny, D. (2025). VGGT: Visual Geometry Grounded Transformer. <em>arXiv</em>.<br>
+      Jocher, G., Chaurasia, A., &amp; Qiu, J. (2023). Ultralytics YOLOv8 (Version 8.0.0) [Computer software].
+    </p>
+  </div>
+</div>
+
+
+<!-- ==================== FOOTER ==================== -->
+<footer>
+  <p>
+    Neuropsychology Lab, Department of Psychology,
+    Carl von Ossietzky Universität Oldenburg<br>
+    Template adapted from <a href="https://github.com/nerfies/nerfies.github.io">Nerfies</a>
+    under a <a href="http://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0 License</a>.
+  </p>
+</footer>
+
+</body>
+</html>
