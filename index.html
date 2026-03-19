@@ -522,117 +522,18 @@
  
 <!-- ==================== DEMO ==================== -->
 <div class="section">
-  <h2>Demo: Input → Output</h2>
+  <h2>Example Input Video</h2>
   <div class="separator"></div>
   <p class="text-center">
-    Smartphone video input (left) and the resulting 3D electrode localization (right).
+    A ~45-second smartphone recording walking around the head is all the pipeline needs.
   </p>
- 
-  <div class="demo-grid">
-    <div class="demo-card">
-      <div class="demo-pair">
-        <video autoplay loop muted playsinline src="static/videos/demo1_input.mp4"></video>
-        <video autoplay loop muted playsinline src="static/videos/demo1_output.mp4"></video>
-      </div>
-      <div class="caption">
-        <span class="demo-label input">Input</span>
-        <span class="demo-label output">Output</span>
-        <strong>Well-reconstructed recording.</strong>
-        Smooth camera motion with translational movement provides VGGT
-        sufficient parallax for accurate depth estimation. Mean error: ~5 mm.
-      </div>
-    </div>
- 
-    <div class="demo-card">
-      <div class="demo-pair">
-        <video autoplay loop muted playsinline src="static/videos/demo2_input.mp4"></video>
-        <video autoplay loop muted playsinline src="static/videos/demo2_output.mp4"></video>
-      </div>
-      <div class="caption">
-        <span class="demo-label input">Input</span>
-        <span class="demo-label output">Output</span>
-        <strong>Poor reconstruction example.</strong>
-        Rotational camera motion deprives VGGT of translational parallax,
-        resulting in depth estimation errors and distorted 3D output.
-      </div>
-    </div>
-  </div>
- 
-  <p class="text-center mt-2" style="font-size:0.85rem; color:#999;">
-    Output visualizations rendered using the pipeline's 3D head coordinate system.
-  </p>
-</div>
- 
- 
-<!-- ==================== KEY RESULTS ==================== -->
-<div class="section">
-  <h2>Validation Results</h2>
-  <div class="separator"></div>
- 
-  <p class="text-center">
-    Validated on a styrofoam head model with a 24-channel EEG cap:<br>
-    10 digitizer recordings (ground truth) vs. 10 smartphone video recordings.
-  </p>
- 
-  <div class="stats-row">
-    <div class="stat-item">
-      <div class="stat-value">4.82 mm</div>
-      <div class="stat-label">Mean accuracy error</div>
-    </div>
-    <div class="stat-item">
-      <div class="stat-value">0.998</div>
-      <div class="stat-label">ICC between methods</div>
-    </div>
-    <div class="stat-item">
-      <div class="stat-value">p = 0.527</div>
-      <div class="stat-label">Repeatability (Wilcoxon)</div>
-    </div>
-    <div class="stat-item">
-      <div class="stat-value">0.997</div>
-      <div class="stat-label">ICC within pipeline</div>
-    </div>
-  </div>
- 
-  <div class="findings">
-    <div class="finding-card orange">
-      <h4><i class="fas fa-bullseye"></i> &nbsp;Accuracy</h4>
-      <p>
-        ICC showed excellent overall agreement between methods (0.998),
-        confirming that the pipeline captures the correct electrode layout.
-        The mean positional error of 4.82 mm reflects a small remaining offset,
-        likely caused by depth estimation errors during rotational camera movement.
-      </p>
-    </div>
- 
-    <div class="finding-card purple">
-      <h4><i class="fas fa-sync-alt"></i> &nbsp;Repeatability</h4>
-      <p>
-        The pipeline reproduces electrode positions as consistently as the
-        digitizer (Wilcoxon p = 0.527). Within-method ICC: digitizer 0.999,
-        pipeline 0.997 — both excellent.
-      </p>
-    </div>
- 
-    <div class="finding-card">
-      <h4><i class="fas fa-exclamation-triangle"></i> &nbsp;Recording Quality</h4>
-      <p>
-        3 of 10 recordings produced poor reconstructions (40–48 mm error)
-        due to rotational camera motion, which deprives VGGT of the
-        translational parallax needed for depth estimation.
-      </p>
-    </div>
- 
-    <div class="finding-card green">
-      <h4><i class="fas fa-lightbulb"></i> &nbsp;Conclusion</h4>
-      <p>
-        These results support the pipeline as a promising proof of concept
-        for low-cost electrode localization, with recording quality and
-        depth estimation identified as key areas for further improvement.
-      </p>
+
+  <div style="max-width:500px; margin:20px auto;">
+    <div style="background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 12px rgba(0,0,0,0.06);">
+      <iframe width="100%" height="400" src="https://www.youtube.com/embed/YJSPIFmB0aU" frameborder="0" allowfullscreen></iframe>
     </div>
   </div>
 </div>
- 
  
 <!-- ==================== FIGURES ==================== -->
 <div class="section-alt">
