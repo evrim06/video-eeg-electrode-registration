@@ -503,31 +503,28 @@
     <div class="pipeline-grid">
       <div class="pipeline-step">
         <div class="step-number">1</div>
-        <div class="placeholder-img"><i class="fas fa-mobile-alt"></i></div>
-        <!-- Replace with: <img src="static/images/step1_recording.png" alt="Video Recording"> -->
+        <img src="static/images/step1_recording.png" alt="Video Recording">
         <h4>Video Recording</h4>
         <p>Mark landmarks, record ~45 sec with a 1080p smartphone camera.</p>
       </div>
 
       <div class="pipeline-step">
         <div class="step-number">2</div>
-        <div class="placeholder-img"><i class="fas fa-cube"></i></div>
-        <!-- Replace with: <img src="static/images/step2_vggt.png" alt="VGGT Reconstruction"> -->
+        <img src="static/images/step2_vggt.png" alt="VGGT Reconstruction">
         <h4>3D Reconstruction</h4>
         <p>VGGT extracts 3D point cloud, camera poses, and depth maps from 28 frames.</p>
       </div>
 
       <div class="pipeline-step">
         <div class="step-number">3</div>
-        <div class="placeholder-img"><i class="fas fa-crosshairs"></i></div>
-        <!-- Replace with: <img src="static/images/step3_detection.png" alt="Electrode Detection"> -->
+        <img src="static/images/step3_detection.png" alt="Electrode Detection">
         <h4>Electrode Detection</h4>
         <p>YOLOv8 auto-detection with 80% confidence filter + manual correction.</p>
       </div>
 
       <div class="pipeline-step">
         <div class="step-number">4</div>
-        <img src="static/images/3d_visualization_top (1).png" alt="Head Coordinate Transform">
+        <img src="static/images/step4_headcoord.png" alt="Head Coordinate Transform">
         <h4>Head Coordinate Transform</h4>
         <p>Landmark alignment, real-world scaling, and 3D coordinate extraction.</p>
       </div>
@@ -548,12 +545,8 @@
     <!-- DEMO 1 -->
     <div class="demo-card">
       <div class="demo-pair">
-        <div style="height:220px;background:#e8edf2;display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:0.85rem;">
-          demo1_input.mp4
-        </div>
-        <div style="height:220px;background:#dfe6ed;display:flex;align-items:center;justify-content:center;color:var(--uol-orange);font-size:0.85rem;">
-          demo1_output.mp4
-        </div>
+        <video autoplay loop muted playsinline src="static/videos/demo1_input.mp4"></video>
+        <video autoplay loop muted playsinline src="static/videos/demo1_output.mp4"></video>
       </div>
       <div class="caption">
         <span class="demo-label input">Input</span>
@@ -567,12 +560,8 @@
     <!-- DEMO 2 -->
     <div class="demo-card">
       <div class="demo-pair">
-        <div style="height:220px;background:#e8edf2;display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:0.85rem;">
-          demo2_input.mp4
-        </div>
-        <div style="height:220px;background:#dfe6ed;display:flex;align-items:center;justify-content:center;color:var(--uol-orange);font-size:0.85rem;">
-          demo2_output.mp4
-        </div>
+        <video autoplay loop muted playsinline src="static/videos/demo2_input.mp4"></video>
+        <video autoplay loop muted playsinline src="static/videos/demo2_output.mp4"></video>
       </div>
       <div class="caption">
         <span class="demo-label input">Input</span>
@@ -668,14 +657,9 @@
     <h2>Visualizations</h2>
     <div class="separator"></div>
 
-    <p class="text-center">
-      Replace the placeholder images below with your actual figures.
-      Place them in a <code>static/images/</code> folder in your repo.
-    </p>
-
     <div class="results-grid">
       <div class="result-card">
-       <img src="static/images/accuracy_headmap.png" alt="Accuracy Head Map">
+        <img src="static/images/accuracy_headmap.png" alt="Accuracy Head Map">
         <div class="caption">
           <strong>Inter-Method Accuracy.</strong>
           Per-electrode Euclidean distance between pipeline and digitizer mean positions.
@@ -701,8 +685,7 @@
       </div>
 
       <div class="result-card">
-        <div style="height:260px;background:var(--bg-section);display:flex;align-items:center;justify-content:center;color:var(--uol-accent);font-size:1rem;">
-          <img src="static/images/repeatability_electrode_boxplot.png" alt="Electrode Repeatability">
+        <img src="static/images/repeatability_electrode_boxplot.png" alt="Electrode Repeatability">
         <div class="caption">
           <strong>Intra-Method Repeatability (Per-Electrode).</strong>
           Each dot represents one electrode from one recording. Full spread of individual observations.
@@ -710,7 +693,7 @@
       </div>
 
       <div class="result-card result-full">
-          <img src="static/images/variability_headmap_comparison.png" alt="Variability Comparisony">
+        <img src="static/images/variability_headmap_comparison.png" alt="Variability Comparison">
         <div class="caption">
           <strong>Repeatability Comparison (Spatial Variance).</strong>
           Side-by-side comparison of digitizer vs. pipeline internal consistency.
