@@ -1,5 +1,7 @@
 # Video EEG Electrode Registration Pipeline
 
+🌐 **[Project Website](https://evrim06.github.io/video-eeg-electrode-registration/)** | 📄 **[Documentation](#user-guide)**
+
 ## Overview
 Electroencephalography (EEG) is a non-invasive technique that can measure the neural activity of the brain with high temporal resolution. EEG signals are recording from the scalp by placing several electrodes. Accurate localization of EEG electrodes is essential for reliable brain activity data analysis. Traditional digitizing methods such as ultrasound, motion capture and structured-light 3D scan are reliable methods but can require expensive equipment or complex setup procedures (Clausner et al., 2017;Homölle & Oostenveld, 2019;Reis et al., 2015;Shirazi et al., 2019;Taberna et all., 2019;).
 
