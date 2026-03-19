@@ -23,7 +23,7 @@ The pipeline consists of **two main scripts**:
 
 | Script | Purpose | Key Operations |
 |--------|---------|----------------|
-| **Script 1** | Annotation & Tracking | Crop → Extract frames → VGGT reconstruction → Sequential landmark annotation (NAS→LPA→RPA) → Electrode annotation (with YOLO quality filtering) → 3D triangulation → Review → Save |
+| **Script 1** | Annotation & Tracking | Extract frames → VGGT reconstruction → Landmark annotation (NAS→LPA→RPA) → Electrode annotation (YOLO+ Manual) → 3D triangulation → Review → Save |
 | **Script 2** | 3D Coordinate Processing | Load 3D points → Verify landmarks → User measurement → Coordinate transform → Scale to mm → Export |
 ---
 
@@ -37,18 +37,16 @@ flowchart TD
     subgraph Script1 ["Script 1: Annotation & Tracking"]
         direction TB
         Select["1. Select Video"]
-        Crop["2. Interactive Crop(Define head ROI)"]
-        Extract["3. Extract Frames(every Nth frame)"]
-        VGGT["4. VGGT Reconstruction(Camera poses + Depth maps)"]
-        Landmarks["5. Annotate Landmarks(NAS → LPA → RPA)"]
-        Electrodes["6. Annotate Electrodes(Manual + YOLO 80% filter)"]
-        Triangulate["7. 3D Triangulation(Multi-view → 3D positions)"]
-        Project["8. Project & Track(3D → 2D all frames)"]
-        Review["9. Review Tracking(Accept or Redo)"]
-        Save["10. Save Results"]
+        Extract["2. Extract Frames(every Nth frame)"]
+        VGGT["3. VGGT Reconstruction(Camera poses + Depth maps)"]
+        Landmarks["4. Annotate Landmarks(NAS → LPA → RPA)"]
+        Electrodes["5. Annotate Electrodes(Manual + YOLO 80% filter)"]
+        Triangulate["6. 3D Triangulation(Multi-view → 3D positions)"]
+        Project["7. Project & Track(3D → 2D all frames)"]
+        Review["8. Review Tracking(Accept or Redo)"]
+        Save["9. Save Results"]
         
-        Select --> Crop
-        Crop --> Extract
+        Select --> Extract
         Extract --> VGGT
         VGGT --> Landmarks
         Landmarks --> Electrodes
@@ -63,7 +61,6 @@ flowchart TD
     Save -.->|"Video-specific folder"| ResultsFolder[("results/IMG_3841/")]
     ResultsFolder -.-> TrackPkl["tracking_results.pkl"]
     ResultsFolder -.-> Points3D["points_3d_intermediate.pkl"]
-    ResultsFolder -.-> CropInfo["crop_info.json"]
     ResultsFolder -.-> VGGTDir["vggt_output/"]
 
     subgraph Script2 ["Script 2: 3D Coordinate Processing"]
@@ -133,20 +130,6 @@ flowchart TD
 - Lists available videos from `data/Video_Recordings/`
 - Creates video-specific results folder (e.g., `results/IMG_3841/`)
 - All outputs for this video stored separately
-
----
-
-#### 1.2 Interactive Cropping
-**Goal:** Define region containing the head in ALL frames
-
-**Controls:**
-- `A` / `D` - Navigate backward/forward through frames
-- Mouse - Draw bounding box around head
-- `SPACE` - Confirm and continue
-
-**Tips:**
-- Make box **large enough** to contain head in all frames
-- Try to keep as much as background information for VGGT reconstruction
 
 ---
 
@@ -424,19 +407,21 @@ results/
     "origin": "midpoint between LPA and RPA",
     "x_axis": "left to right (LPA -> RPA)",
     "y_axis": "back to front (INION -> NAS)",
-    "z_axis": "down to up",
-    "units": "mm"
+    "z_axis": "down to up"
+  },
+  "units": "mm",
+  "measurement": {
+    "method": "caliper",
+    "ear_to_ear_mm": 150.0,
+    "scale_factor": 12.34
   },
   "landmarks": {
-    "NAS": {
-      "position": [0.0, 85.2, 12.3]
-    }
+    "NAS": {"position": [0.0, 85.2, 12.3]}
   },
   "electrodes": {
-    "E0": {
-      "position": [12.3, 45.6, 78.9]
-    }
-  }
+    "E0": {"position": [12.3, 45.6, 78.9]}
+  },
+  "num_electrodes": 24
 }
 ```
 
@@ -485,11 +470,10 @@ Units:  Millimeters (mm)
 1. **Clausner, T., Dalal, S. S., & Crespo-García, M. (2017).** Photogrammetry-Based Head Digitization for Rapid and Accurate Localization of EEG Electrodes and MEG Fiducial Markers Using a Single Digital SLR Camera. *Frontiers in Neuroscience*, 11, 264.
 2. **Homölle, S., & Oostenveld, R. (2019).** Using a structured-light 3D scanner to improve EEG source modeling with more accurate electrode positions. *Journal of Neuroscience Methods*, 326, 108378.
 3. **Jocher, G., et al. (2024).** Ultralytics YOLO. Available at: https://github.com/ultralytics/ultralytics.
-4. **Ravi, N., et al. (2024).** SAM 2: Segment Anything in Images and Videos. Available at: https://github.com/facebookresearch/sam2.
-5. **Reis, P. M. R., & Lochmann, M. (2015).** Using a motion capture system for spatial localization of EEG electrodes. *Frontiers in Neuroscience*, 9, 130.
-6. **Shirazi, S. Y., & Huang, H. J. (2019).** More Reliable EEG Electrode Digitizing Methods Can Reduce Source Estimation Uncertainty, but Current Methods Already Accurately Identify Brodmann Areas. *Frontiers in Neuroscience*, 13, 1159.
-7. **Taberna, G. A., Marino, M., Ganzetti, M., & Mantini, D. (2019).** Spatial localization of EEG electrodes using 3D scanning. *Journal of Neural Engineering*, 16, 026020.
-8. **Wang, J., et al. (2025).** VGGT: Visual Geometry Grounded Transformer. Available at: https://github.com/facebookresearch/vggt.
+4. **Reis, P. M. R., & Lochmann, M. (2015).** Using a motion capture system for spatial localization of EEG electrodes. *Frontiers in Neuroscience*, 9, 130.
+5. **Shirazi, S. Y., & Huang, H. J. (2019).** More Reliable EEG Electrode Digitizing Methods Can Reduce Source Estimation Uncertainty, but Current Methods Already Accurately Identify Brodmann Areas. *Frontiers in Neuroscience*, 13, 1159.
+6. **Taberna, G. A., Marino, M., Ganzetti, M., & Mantini, D. (2019).** Spatial localization of EEG electrodes using 3D scanning. *Journal of Neural Engineering*, 16, 026020.
+7. **Wang, J., et al. (2025).** VGGT: Visual Geometry Grounded Transformer. Available at: https://github.com/facebookresearch/vggt.
 
 ---
 

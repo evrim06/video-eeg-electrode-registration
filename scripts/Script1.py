@@ -243,28 +243,12 @@ def extract_frames(video_path, output_paths):
         elif e == cv2.EVENT_LBUTTONUP:
             drawing = False
     
-    cv2.namedWindow("Crop")
-    cv2.setMouseCallback("Crop", mouse)
-    print("\n--- Draw box around HEAD ---")
-    
-    while True:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if not ret: break
-        disp, scale = resize_for_display(frame, CONFIG["display_height"])
-        show = disp.copy()
-        cv2.putText(show, f"Frame {idx}/{total-1} | A/S:Nav | SPACE:Confirm", (10,30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-        if roi:
-            cv2.rectangle(show, (roi[0],roi[1]), (roi[0]+roi[2],roi[1]+roi[3]), (0,255,255), 2)
-        cv2.imshow("Crop", show)
-        k = cv2.waitKey(30) & 0xFF
-        if k == ord('a'): idx = max(0, idx-15)
-        elif k == ord('s'): idx = min(total-1, idx+15)
-        elif k in (13,32) and roi: break
-        elif k == ord('q'): sys.exit(0)
-    
-    cv2.destroyWindow("Crop")
+# Skip cropping - use full frame to give VGGT background context
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    ret, frame = cap.read()
+    full_h, full_w = frame.shape[:2]
+    roi = (0, 0, full_w, full_h)  # fake ROI = entire frame
+    scale = 1.0
     cap.release()
     
     sx, sy, sw, sh = int(roi[0]/scale), int(roi[1]/scale), int(roi[2]/scale), int(roi[3]/scale)
