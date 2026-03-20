@@ -55,15 +55,15 @@ const landmarks = {
 const electrodes = {
   "FP2": [29.254, 94.229, 29.150],   "FP1": [-32.069, 90.218, 28.465],
   "F7": [-67.370, 48.084, 20.499],   "T7": [-80.836, 0.550, 13.884],
-  "C3": [-59.967, -17.321, 71.133],  "TP9": [-71.451, -39.148, 33.509],
-  "CP5": [-77.016, -24.835, -37.251],"P3": [-50.414, -72.248, 42.881],
+  "C3": [-59.967, -17.321, 71.133],  "CP5": [-71.451, -39.148, 33.509],
+  "TP9": [-77.016, -24.835, -37.251],"P3": [-50.414, -72.248, 42.881],
   "CP1": [-32.727, -51.819, 81.457], "CZ": [-0.819, -51.312, 86.928],
   "O1": [-28.887, -84.921, -9.226],  "CPZ": [1.295, -77.828, 63.158],
   "FZ": [-0.065, -17.862, 98.513],   "FC1": [-35.121, 18.117, 86.365],
   "FC2": [26.529, 17.546, 87.110],   "CP2": [25.619, -50.814, 73.601],
   "C4": [58.557, -10.115, 72.523],   "P4": [45.770, -70.168, 42.209],
-  "O2": [21.546, -84.713, -11.554],  "TP10": [69.572, -39.062, 32.719],
-  "CP6": [74.774, -31.297, -34.276], "T8": [80.618, 1.303, 17.189],
+  "O2": [21.546, -84.713, -11.554],  "CP6": [69.572, -39.062, 32.719],
+  "TP10": [74.774, -31.297, -34.276], "T8": [80.618, 1.303, 17.189],
   "F8": [68.851, 51.205, 24.883],    "PZ": [-4.358, 51.611, 81.632]
 };
 
@@ -160,25 +160,16 @@ headMesh.position.set(HC.x, HC.y, HC.z);
 headGroup.add(headMesh);
 
 // ============================================================
-// NOSE — positioned near NAS (front of head, between brows)
-// NAS in Three.js is at z=-93, so front is negative Z
+// NOSE — small bump to indicate face side
 // ============================================================
-const noseGeo = new THREE.SphereGeometry(1, 16, 16);
-const nPos = noseGeo.attributes.position;
-for (let i = 0; i < nPos.count; i++) {
-  let x = nPos.getX(i) * 7;
-  let y = nPos.getY(i) * 12;
-  let z = nPos.getZ(i) * 10;
-  if (y < 0) { x *= (1 + y / 25); z *= (1 + y / 30); }
-  nPos.setXYZ(i, x, y, z);
-}
-noseGeo.computeVertexNormals();
-
-const noseMesh = new THREE.Mesh(noseGeo, new THREE.MeshPhysicalMaterial({
-  color: 0xe8ddd0, roughness: 0.6, transparent: true, opacity: 0.72,
-}));
-// Place below and in front of NAS
-noseMesh.position.set(HC.x, HC.y - 30, HC.z - HR.z - 3);
+const noseMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(5, 12, 12),
+  new THREE.MeshPhysicalMaterial({
+    color: 0xe8ddd0, roughness: 0.6, transparent: true, opacity: 0.72,
+  })
+);
+noseMesh.scale.set(1, 0.8, 1.2);
+noseMesh.position.set(HC.x, HC.y - 30, HC.z - HR.z - 2);
 headGroup.add(noseMesh);
 
 // ============================================================
@@ -271,7 +262,7 @@ function addPoint(name, pipelinePos, color, radius, isLandmark) {
   }
 }
 
-for (const [n, p] of Object.entries(electrodes)) addPoint(n, p, 0x666699, 4.0, false);
+for (const [n, p] of Object.entries(electrodes)) addPoint(n, p, 0xDA91BA, 4.0, false);
 for (const [n, d] of Object.entries(landmarks))  addPoint(n, d.pos, d.color, 5.5, true);
 
 // ============================================================
