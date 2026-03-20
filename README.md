@@ -1,4 +1,4 @@
-# Video EEG Electrode Registration Pipeline
+# Smartphone Based Video EEG Electrode Localization Pipeline
 
 [![Project Website](https://img.shields.io/badge/🌐_Project_Website-Visit-00ABD9?style=for-the-badge)](https://evrim06.github.io/video-eeg-electrode-registration/)
 
