@@ -241,7 +241,7 @@ for (const [n, d] of Object.entries(landmarks))  addPoint(n, d.pos, d.color, 5.5
 // CONTROLS
 // ============================================================
 let isDragging = false, prevM = { x: 0, y: 0 };
-let rotX = -0.1, rotY = 0, zoom = 340;
+let rotX = -0.1, rotY = Math.PI, zoom = 340;
 let autoRotate = true, autoTimer;
 
 function startDrag(x, y) {
