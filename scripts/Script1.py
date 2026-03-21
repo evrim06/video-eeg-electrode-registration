@@ -39,7 +39,7 @@ if DEVICE == "cuda":
     torch.backends.cudnn.allow_tf32 = False
     print(f"Device: GPU (CUDA)")
 else:
-    print(f"Device: CPU (VGGT will take 30-60+ minutes - be patient)")
+    print(f"Device: CPU (VGGT will take ~120 minutes)")
 
 # Path configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -106,7 +106,7 @@ LANDMARK_SHORT = {0: "NAS", 1: "LPA", 2: "RPA"}
 LANDMARK_COLORS = {0: (0, 0, 255), 1: (255, 0, 0), 2: (0, 255, 0)}
 
 VGGT_SIZE = 518
-MAX_VGGT_FRAMES = 28  # Same for CPU and GPU - no timeout, will wait for completion
+MAX_VGGT_FRAMES = 28  
 
 CONFIG = {
     "frame_skip": 5,
@@ -243,7 +243,7 @@ def extract_frames(video_path, output_paths):
         elif e == cv2.EVENT_LBUTTONUP:
             drawing = False
     
-# Skip cropping - use full frame to give VGGT background context
+#use full frame to give VGGT background context
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     ret, frame = cap.read()
     full_h, full_w = frame.shape[:2]
@@ -482,7 +482,7 @@ except Exception as e:
     with open(script_path, "w") as f:
         f.write(subprocess_script)
     
-    # Run subprocess - no timeout, let it complete naturally
+    # Run subprocess, let it complete naturally
     # Subprocess isolation still helps with memory cleanup after completion
     print("  (No timeout - will run until complete)")
     

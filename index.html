@@ -375,6 +375,102 @@
  
     .demo-label.input  { background: var(--uol-accent); color: #fff; }
     .demo-label.output { background: var(--uol-orange); color: #fff; }
+
+    /* ---- Code Demo ---- */
+    .code-demos {
+      display: flex;
+      flex-direction: column;
+      gap: 30px;
+      margin-top: 30px;
+    }
+
+    .code-demo {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    }
+
+    .code-demo-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      background: var(--uol-blue);
+      color: #fff;
+    }
+
+    .code-demo-header h4 {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .code-demo-header .step-tag {
+      background: var(--uol-accent);
+      color: #fff;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .code-demo-body {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 300px;
+    }
+
+    @media (max-width: 700px) {
+      .code-demo-body { grid-template-columns: 1fr; }
+    }
+
+    .code-demo-body .code-side {
+      background: #1e1e2e;
+      padding: 20px;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    .code-side pre {
+      margin: 0;
+      font-family: 'Courier New', monospace;
+      font-size: 0.8rem;
+      line-height: 1.7;
+      color: #cdd6f4;
+      white-space: pre;
+    }
+
+    .code-side .comment { color: #6c7086; }
+    .code-side .keyword { color: #cba6f7; }
+    .code-side .string  { color: #a6e3a1; }
+    .code-side .func    { color: #89b4fa; }
+    .code-side .number  { color: #fab387; }
+    .code-side .param   { color: #f9e2af; }
+
+    .code-demo-body .visual-side {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--bg-section);
+      min-height: 300px;
+    }
+
+    .code-demo-body .visual-side video,
+    .code-demo-body .visual-side img {
+      max-width: 100%;
+      max-height: 280px;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+
+    .code-caption {
+      padding: 14px 20px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      border-top: 1px solid #eee;
+    }
  
     /* ---- BibTeX ---- */
     .bibtex-box {
@@ -521,27 +617,131 @@
     </div>
   </div>
 </div>
- 
-<!-- ==================== 3D VIEWER ==================== -->
-<div class="section">
-  <h2>Pipeline Output: 3D Electrode Positions</h2>
-  <div class="separator"></div>
-  <p class="text-center">
-    3D electrode localization from a single 45-second smartphone video recording.<br>
-    Drag to rotate · Scroll to zoom · Hover for electrode labels
-  </p>
 
-  <div style="max-width:700px; margin:20px auto;">
-    <div style="background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-      <iframe src="3d_viewer.html" width="100%" height="500" style="border:none; display:block;"></iframe>
+<!-- ==================== CODE DEMOS ==================== -->
+<div class="section-alt">
+  <div class="section">
+    <h2>How It Works</h2>
+    <div class="separator"></div>
+    <p class="text-center">
+      Key processing steps from the pipeline source code.
+    </p>
+
+    <div class="code-demos">
+
+      <!-- DEMO 1: VGGT Reconstruction -->
+      <div class="code-demo">
+        <div class="code-demo-header">
+          <h4>3D Reconstruction with VGGT</h4>
+          <span class="step-tag">Script 1 · Step 2</span>
+        </div>
+        <div class="code-demo-body">
+          <div class="code-side">
+<pre><span class="comment"># Extract 28 evenly-spaced frames from video</span>
+frames = extract_frames(video_path, n=<span class="number">28</span>)
+
+<span class="comment"># Run VGGT — returns 3D point cloud,</span>
+<span class="comment"># camera poses, and depth maps</span>
+vggt_data = <span class="func">run_vggt_full</span>(frames, crop_info)
+
+<span class="comment"># Output contains:</span>
+<span class="comment">#   depths:     (28, 518, 518)  depth maps</span>
+<span class="comment">#   extrinsics: (28, 4, 4)     camera poses</span>
+<span class="comment">#   intrinsics: (28, 3, 3)     camera params</span>
+<span class="comment">#   points:     (28, 518, 518, 3) point maps</span></pre>
+          </div>
+          <div class="visual-side">
+            <img src="static/images/demo_pointcloud.png" alt="VGGT point cloud">
+          </div>
+        </div>
+        <div class="code-caption">
+          VGGT processes 28 video frames in a single forward pass (~3 sec on GPU) to produce dense 3D reconstruction with camera parameters.
+        </div>
+      </div>
+
+      <!-- DEMO 2: Electrode Detection -->
+      <div class="code-demo">
+        <div class="code-demo-header">
+          <h4>Multi-View Electrode Triangulation</h4>
+          <span class="step-tag">Script 1 · Step 3</span>
+        </div>
+        <div class="code-demo-body">
+          <div class="code-side">
+<pre><span class="comment"># Unproject 2D click to 3D using depth map</span>
+<span class="keyword">def</span> <span class="func">unproject_pixel</span>(u, v, depth_map,
+                     intrinsic, extrinsic):
+    z = depth_map[<span class="func">int</span>(v), <span class="func">int</span>(u)]
+    fx, fy = intrinsic[<span class="number">0</span>,<span class="number">0</span>], intrinsic[<span class="number">1</span>,<span class="number">1</span>]
+    cx, cy = intrinsic[<span class="number">0</span>,<span class="number">2</span>], intrinsic[<span class="number">1</span>,<span class="number">2</span>]
+
+    <span class="comment"># Camera-space 3D point</span>
+    x_cam = (u - cx) * z / fx
+    y_cam = (v - cy) * z / fy
+    P_cam = [x_cam, y_cam, z, <span class="number">1.0</span>]
+
+    <span class="comment"># Transform to world coordinates</span>
+    P_world = <span class="func">inv</span>(extrinsic) @ P_cam
+    <span class="keyword">return</span> P_world[:3]</pre>
+          </div>
+          <div class="visual-side">
+            <img src="static/images/demo_triangulation.png" alt="Multi-view triangulation">
+          </div>
+        </div>
+        <div class="code-caption">
+          Each electrode click is unprojected from 2D to 3D using VGGT's depth maps and camera parameters. Multiple observations from different viewpoints are averaged for robust localization.
+        </div>
+      </div>
+
+      <!-- DEMO 3: Head Coordinate Transform -->
+      <div class="code-demo">
+        <div class="code-demo-header">
+          <h4>Head Coordinate Transform</h4>
+          <span class="step-tag">Script 2 · Step 5</span>
+        </div>
+        <div class="code-demo-body">
+          <div class="code-side">
+<pre><span class="comment"># Build coordinate system from landmarks</span>
+origin = (LPA + RPA) / <span class="number">2</span>
+
+<span class="comment"># X-axis: left → right (LPA → RPA)</span>
+x_axis = <span class="func">normalize</span>(RPA - LPA)
+
+<span class="comment"># Y-axis: back → front (INION → NAS)</span>
+y_axis = <span class="func">normalize</span>(NAS - INION)
+y_axis = <span class="func">orthogonalize</span>(y_axis, x_axis)
+
+<span class="comment"># Z-axis: down → up (cross product)</span>
+z_axis = <span class="func">cross</span>(x_axis, y_axis)
+
+<span class="comment"># Scale to real-world mm</span>
+scale = ear_to_ear_mm / <span class="func">norm</span>(RPA - LPA)
+
+<span class="comment"># Transform all electrodes</span>
+<span class="keyword">for</span> electrode <span class="keyword">in</span> electrodes:
+    pos_mm = (electrode - origin) @ R * scale</pre>
+          </div>
+          <div class="visual-side">
+            <img src="static/images/demo_coordinates.png" alt="Head coordinate system">
+          </div>
+        </div>
+        <div class="code-caption">
+          Anatomical landmarks define a head-centered coordinate system. A single physical measurement (ear-to-ear distance) scales the reconstruction from arbitrary VGGT units to millimeters.
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
+
 <!-- ==================== FIGURES ==================== -->
 <div class="section-alt">
   <div class="section">
-    <h2>Visualizations</h2>
+    <h2>Validation Study</h2>
     <div class="separator"></div>
+    <p class="text-center">
+      Validated on a styrofoam head model with a 24-channel EEG cap:<br>
+      10 digitizer recordings (ground truth) vs. 10 smartphone video recordings.
+    </p>
  
     <div class="results-grid">
       <div class="result-card">
@@ -590,6 +790,24 @@
 </div>
  
  
+ 
+<!-- ==================== 3D VIEWER ==================== -->
+<div class="section">
+  <h2>Pipeline Output: 3D Electrode Positions</h2>
+  <div class="separator"></div>
+  <p class="text-center">
+    3D electrode localization from a single 45-second smartphone video recording.<br>
+    Drag to rotate · Scroll to zoom · Hover for electrode labels
+  </p>
+
+  <div style="max-width:700px; margin:20px auto;">
+    <div style="background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 12px rgba(0,0,0,0.06);">
+      <iframe src="3d_viewer.html" width="100%" height="500" style="border:none; display:block;"></iframe>
+    </div>
+  </div>
+</div>
+
+
 <!-- ==================== BIBTEX ==================== -->
 <div class="section">
   <h2>BibTeX</h2>
