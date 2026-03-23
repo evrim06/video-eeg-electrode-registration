@@ -2,6 +2,8 @@
 
 [![Project Website](https://img.shields.io/badge/🌐_Project_Website-Visit-00ABD9?style=for-the-badge)](https://evrim06.github.io/video-eeg-electrode-registration/)
 [![Poster](https://img.shields.io/badge/🖼_Poster-View-EE7100?style=for-the-badge)](https://evrim06.github.io/video-eeg-electrode-registration/poster.html)
+> ⚠️ **Under Active Development** — This pipeline is a research prototype validated on a styrofoam head model. Validation with human subjects is planned. Contributions and feedback are welcome.
+
 ## Overview
 Electroencephalography (EEG) is a non-invasive technique that can measure the neural activity of the brain with high temporal resolution. EEG signals are recording from the scalp by placing several electrodes. Accurate localization of EEG electrodes is essential for reliable brain activity data analysis. Traditional digitizing methods such as ultrasound, motion capture and structured-light 3D scan are reliable methods but can require expensive equipment or complex setup procedures (Clausner et al., 2017; Homölle & Oostenveld, 2019; Reis et al., 2015; Shirazi et al., 2019; Taberna et all., 2019).
 
