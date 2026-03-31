@@ -653,12 +653,13 @@ vggt_data = <span class="func">run_vggt_full</span>(frames, crop_info)
 <span class="comment">#   intrinsics: (28, 3, 3)     camera params</span>
 <span class="comment">#   points:     (28, 518, 518, 3) point maps</span></pre>
           </div>
-          <div class="visual-side">
-            <img src="static/images/demo_pointcloud.png" alt="VGGT point cloud">
+          <div class="visual-side" style="padding:0; overflow:hidden; border-radius:0 8px 8px 0; min-height:320px;">
+            <iframe src="reconstruction_viewer.html" width="100%" height="100%" style="border:none; display:block; min-height:320px;"></iframe>
           </div>
         </div>
         <div class="code-caption">
           VGGT processes 28 video frames in a single forward pass (~3 sec on GPU) to produce dense 3D reconstruction with camera parameters.
+          <em style="color:var(--uol-accent);">Interact with the 3D point cloud above — drag to rotate, scroll to zoom.</em>
         </div>
       </div>
 
@@ -741,13 +742,14 @@ scale = ear_to_ear_mm / <span class="func">norm</span>(RPA - LPA)
   <h2>Pipeline Output: 3D Electrode Positions</h2>
   <div class="separator"></div>
   <p class="text-center">
-    3D electrode localization from a single 45-second smartphone video recording.<br>
-    Drag to rotate · Scroll to zoom · Hover for electrode labels
+    24 electrodes and 3 anatomical landmarks localized on the VGGT 3D reconstruction,
+    from a single 45-second smartphone video recording.<br>
+    Drag to rotate · Scroll to zoom · Hover electrodes for labels
   </p>
 
-  <div style="max-width:700px; margin:20px auto;">
-    <div style="background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-      <iframe src="3d_viewer.html" width="100%" height="500" style="border:none; display:block;"></iframe>
+  <div style="max-width:800px; margin:20px auto;">
+    <div style="border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+      <iframe src="3d_viewer.html" width="100%" height="550" style="border:none; display:block;"></iframe>
     </div>
   </div>
 </div>

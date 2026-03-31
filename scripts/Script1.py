@@ -484,7 +484,6 @@ except Exception as e:
     
     # Run subprocess, let it complete naturally
     # Subprocess isolation still helps with memory cleanup after completion
-    print("  (No timeout - will run until complete)")
     
     try:
         result = subprocess.run(

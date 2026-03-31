@@ -3,324 +3,701 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>3D Electrode Viewer</title>
+<title>3D Electrode Positions on VGGT Reconstruction</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: transparent; overflow: hidden; }
+  body { background: #0f1923; overflow: hidden; font-family: 'Noto Sans', -apple-system, sans-serif; }
+  
+  #container { width: 100vw; height: 100vh; position: relative; }
   canvas { display: block; }
-  #info {
-    position: absolute;
-    bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    font-family: 'Noto Sans', Arial, sans-serif;
-    font-size: 0.8rem;
-    color: #888;
-    pointer-events: none;
+  
+  /* Loading */
+  #loading {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #0f1923; z-index: 10; transition: opacity 0.6s;
   }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid rgba(0,171,217,0.15); border-top-color: #00ABD9;
+    border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading span { color: rgba(255,255,255,0.5); font-size: 13px; }
+  
+  /* Tooltip */
   #tooltip {
-    position: absolute;
-    display: none;
-    background: rgba(0,62,107,0.92);
-    color: #fff;
-    padding: 6px 14px;
-    border-radius: 6px;
-    font-family: 'Noto Sans', Arial, sans-serif;
-    font-size: 0.82rem;
-    pointer-events: none;
-    white-space: nowrap;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    position: absolute; display: none; pointer-events: none;
+    background: rgba(0,62,107,0.92); color: #fff;
+    padding: 5px 12px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    letter-spacing: 0.5px; white-space: nowrap;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+    transform: translate(-50%, -140%);
+    z-index: 20;
+  }
+  #tooltip::after {
+    content: ''; position: absolute; top: 100%; left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent; border-top-color: rgba(0,62,107,0.92);
+  }
+  #tooltip.landmark { background: rgba(238,113,0,0.92); }
+  #tooltip.landmark::after { border-top-color: rgba(238,113,0,0.92); }
+  
+  /* Controls */
+  #controls {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px;
+    background: linear-gradient(transparent, rgba(15,25,35,0.9));
+    opacity: 0; transition: opacity 0.3s; z-index: 5;
+  }
+  #container:hover #controls { opacity: 1; }
+  
+  #controls .hint { color: rgba(255,255,255,0.4); font-size: 11px; }
+  
+  .right-controls { display: flex; align-items: center; gap: 14px; }
+  
+  .ctrl-group {
+    display: flex; align-items: center; gap: 6px;
+    color: rgba(255,255,255,0.5); font-size: 11px;
+  }
+  .ctrl-group input[type="range"] { width: 55px; height: 3px; accent-color: #00ABD9; cursor: pointer; }
+  
+  .ctrl-btn {
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.5); font-size: 11px; padding: 3px 10px;
+    border-radius: 4px; cursor: pointer; transition: all 0.2s;
+  }
+  .ctrl-btn:hover { background: rgba(0,171,217,0.15); border-color: rgba(0,171,217,0.3); color: rgba(255,255,255,0.8); }
+  .ctrl-btn.active { background: rgba(0,171,217,0.25); border-color: #00ABD9; color: #fff; }
+  
+  /* Legend */
+  #legend {
+    position: absolute; top: 12px; left: 12px;
+    display: flex; flex-direction: column; gap: 5px;
+    z-index: 5; opacity: 0; transition: opacity 0.3s;
+  }
+  #container:hover #legend { opacity: 1; }
+  
+  .legend-item {
+    display: flex; align-items: center; gap: 7px;
+    color: rgba(255,255,255,0.5); font-size: 10px; letter-spacing: 0.3px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 1.5px solid rgba(255,255,255,0.3);
+  }
+  
+  /* Info */
+  #info {
+    position: absolute; top: 12px; right: 12px;
+    color: rgba(255,255,255,0.2); font-size: 10px; z-index: 5; letter-spacing: 0.3px;
   }
 </style>
 </head>
 <body>
-<div id="tooltip"></div>
-<div id="info">Drag to rotate · Scroll to zoom · Hover for labels</div>
+
+<div id="container">
+  <div id="loading"><div class="spinner"></div><span>Loading 3D reconstruction...</span></div>
+  <div id="tooltip"></div>
+  <div id="info"></div>
+  
+  <div id="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#00ABD9;"></div>Electrodes (24)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#EE7100;"></div>Landmarks</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(255,255,255,0.08); border-color:rgba(255,255,255,0.1);"></div>VGGT Point Cloud</div>
+  </div>
+  
+  <div id="controls">
+    <span class="hint">Drag to rotate · Scroll to zoom · Hover electrodes for labels</span>
+    <div class="right-controls">
+      <div class="ctrl-group">
+        <span>Points</span>
+        <input type="range" id="sl-points" min="0" max="10" step="0.5" value="2.5">
+      </div>
+      <div class="ctrl-group">
+        <span>Electrodes</span>
+        <input type="range" id="sl-elec" min="0.5" max="3" step="0.25" value="1">
+      </div>
+      <button class="ctrl-btn" id="btn-labels">Labels</button>
+      <button class="ctrl-btn" id="btn-cloud">Cloud</button>
+      <button class="ctrl-btn" id="btn-reset">Reset</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
 <script>
-// ============================================================
-// DATA — pipeline coords: X=left-right, Y=back-front, Z=up
-// Three.js mapping: X=pipeline_X, Y=pipeline_Z, Z=-pipeline_Y
-// ============================================================
-function toThree(p) { return [p[0], p[2], -p[1]]; }
-
-const landmarks = {
-  "NAS":   { pos: [3.086, 93.376, -6.249], color: 0xEE7100 },
-  "LPA":   { pos: [-80.25, 0, 0],          color: 0x00ABD9 },
-  "RPA":   { pos: [80.25, 0, 0],            color: 0x00ABD9 },
-  "INION": { pos: [0, -98.903, -6.249],     color: 0xEE7100 }
+(function() {
+  const container = document.getElementById('container');
+  const loading = document.getElementById('loading');
+  const tooltip = document.getElementById('tooltip');
+  const infoBadge = document.getElementById('info');
+  
+  // ---- Electrode data (VGGT world coords, centered) ----
+  const ELECTRODES = {
+  "NAS": {
+    "position": [
+      -0.031548295905335796,
+      -0.017648200851961143,
+      -0.13877483569564486
+    ],
+    "type": "landmark"
+  },
+  "LPA": {
+    "position": [
+      0.10060842727046446,
+      -0.03325353010153097,
+      0.03230406610343994
+    ],
+    "type": "landmark"
+  },
+  "RPA": {
+    "position": [
+      -0.1757904685738676,
+      -0.04732266426770006,
+      0.010646270048335182
+    ],
+    "type": "landmark"
+  },
+  "E0": {
+    "position": [
+      -0.07305794675415186,
+      -0.08080601509200905,
+      -0.14812767793242176
+    ],
+    "type": "electrode"
+  },
+  "E1": {
+    "position": [
+      0.03196660031993134,
+      -0.07477313135761926,
+      -0.13286982701587458
+    ],
+    "type": "electrode"
+  },
+  "E2": {
+    "position": [
+      0.08658367916204313,
+      -0.06343760515051643,
+      -0.0546577647850266
+    ],
+    "type": "electrode"
+  },
+  "E3": {
+    "position": [
+      0.10303970443899521,
+      -0.0570455021883554,
+      0.029728906002752575
+    ],
+    "type": "electrode"
+  },
+  "E4": {
+    "position": [
+      0.07038128609149957,
+      -0.1598093770493333,
+      0.0506081373828815
+    ],
+    "type": "electrode"
+  },
+  "E5": {
+    "position": [
+      0.08370001318181071,
+      -0.09683498984951357,
+      0.09432690273720712
+    ],
+    "type": "electrode"
+  },
+  "E6": {
+    "position": [
+      0.08823207744813336,
+      0.027397673043329653,
+      0.07916477344393025
+    ],
+    "type": "electrode"
+  },
+  "E7": {
+    "position": [
+      0.04414179818775704,
+      -0.11912837614537823,
+      0.147265040184956
+    ],
+    "type": "electrode"
+  },
+  "E8": {
+    "position": [
+      0.020054969890638277,
+      -0.18446892293048256,
+      0.10499646483564007
+    ],
+    "type": "electrode"
+  },
+  "E9": {
+    "position": [
+      -0.034296456378013346,
+      -0.19662296692365294,
+      0.09914592831271762
+    ],
+    "type": "electrode"
+  },
+  "E10": {
+    "position": [
+      0.0003745258427462761,
+      -0.032911141309388645,
+      0.17256780608217737
+    ],
+    "type": "electrode"
+  },
+  "E11": {
+    "position": [
+      -0.04364776482557438,
+      -0.15931420271523616,
+      0.14739189237663886
+    ],
+    "type": "electrode"
+  },
+  "E12": {
+    "position": [
+      -0.03018139192126606,
+      -0.21229275873692366,
+      0.04008781929602634
+    ],
+    "type": "electrode"
+  },
+  "E13": {
+    "position": [
+      0.03361834964585744,
+      -0.18361490277473508,
+      -0.015570462613094027
+    ],
+    "type": "electrode"
+  },
+  "E14": {
+    "position": [
+      -0.07255158114948679,
+      -0.19037779279962957,
+      -0.02299926865808477
+    ],
+    "type": "electrode"
+  },
+  "E15": {
+    "position": [
+      -0.08105945041613646,
+      -0.17592015776987863,
+      0.09636141816443722
+    ],
+    "type": "electrode"
+  },
+  "E16": {
+    "position": [
+      -0.13267108934648353,
+      -0.17165601196039548,
+      0.022050225368256404
+    ],
+    "type": "electrode"
+  },
+  "E17": {
+    "position": [
+      -0.12129644946939276,
+      -0.12613103842694656,
+      0.1307921849656848
+    ],
+    "type": "electrode"
+  },
+  "E18": {
+    "position": [
+      -0.0866758283486977,
+      -0.033293722752472305,
+      0.16569130746283522
+    ],
+    "type": "electrode"
+  },
+  "E19": {
+    "position": [
+      -0.1592241235782991,
+      -0.10782572379782739,
+      0.07524631534214898
+    ],
+    "type": "electrode"
+  },
+  "E20": {
+    "position": [
+      -0.1737072662297094,
+      0.008126566529943285,
+      0.06943169385568937
+    ],
+    "type": "electrode"
+  },
+  "E21": {
+    "position": [
+      -0.17458442573617183,
+      -0.07679361243979223,
+      0.006241463124265323
+    ],
+    "type": "electrode"
+  },
+  "E22": {
+    "position": [
+      -0.14717745855751818,
+      -0.08252317039984851,
+      -0.07894586592147479
+    ],
+    "type": "electrode"
+  },
+  "E23": {
+    "position": [
+      -0.015527706514160161,
+      -0.1738023968877372,
+      -0.0767477549347173
+    ],
+    "type": "electrode"
+  }
 };
-
-const electrodes = {
-  "FP2": [29.254, 94.229, 29.150],   "FP1": [-32.069, 90.218, 28.465],
-  "F7": [-67.370, 48.084, 20.499],   "T7": [-80.836, 0.550, 13.884],
-  "C3": [-59.967, -17.321, 71.133],  "CP5": [-71.451, -39.148, 33.509],
-  "TP9": [-77.016, -24.835, -37.251],"P3": [-50.414, -72.248, 42.881],
-  "CP1": [-32.727, -51.819, 81.457], "CZ": [-0.819, -51.312, 86.928],
-  "O1": [-28.887, -84.921, -9.226],  "CPZ": [1.295, -77.828, 63.158],
-  "FZ": [-0.065, -17.862, 98.513],   "FC1": [-35.121, 18.117, 86.365],
-  "FC2": [26.529, 17.546, 87.110],   "CP2": [25.619, -50.814, 73.601],
-  "C4": [58.557, -10.115, 72.523],   "P4": [45.770, -70.168, 42.209],
-  "O2": [21.546, -84.713, -11.554],  "CP6": [69.572, -39.062, 32.719],
-  "TP10": [74.774, -31.297, -34.276], "T8": [80.618, 1.303, 17.189],
-  "F8": [68.851, 51.205, 24.883],    "PZ": [-4.358, 51.611, 81.632]
-};
-
-// ============================================================
-// Best-fit ellipsoid (computed from electrode positions)
-// Center in Three.js: (-0.7, 1.3, -1.8)
-// Radii: (83.5, 98.4, 98.0) — use 93% so electrodes sit outside
-// ============================================================
-const HC = { x: -0.7, y: 1.3, z: -1.8 };  // head center
-const HR = { x: 77, y: 91, z: 90 };        // head radii (93% of fit)
-
-// Landmark positions in Three.js
-const NAS_3 = toThree(landmarks.NAS.pos);   // (3, -6, -93) = front
-const INION_3 = toThree(landmarks.INION.pos); // (0, -6, 99) = back
-const LPA_3 = toThree(landmarks.LPA.pos);   // (-80, 0, 0) = left
-const RPA_3 = toThree(landmarks.RPA.pos);   // (80, 0, 0) = right
-
-// ============================================================
-// SCENE
-// ============================================================
-const scene  = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 1, 1000);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(0x000000, 0);
-document.body.appendChild(renderer.domElement);
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-
-const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
-keyLight.position.set(80, 180, -120);
-scene.add(keyLight);
-
-const fillLight = new THREE.DirectionalLight(0xddeeff, 0.3);
-fillLight.position.set(-80, -40, 80);
-scene.add(fillLight);
-
-const rimLight = new THREE.DirectionalLight(0xffffff, 0.2);
-rimLight.position.set(0, -80, 120);
-scene.add(rimLight);
-
-const headGroup = new THREE.Group();
-scene.add(headGroup);
-
-// ============================================================
-// HEAD — data-fitted ellipsoid with jaw taper
-// ============================================================
-const headGeo = new THREE.SphereGeometry(1, 64, 48);
-const pos = headGeo.attributes.position;
-
-for (let i = 0; i < pos.count; i++) {
-  let x = pos.getX(i);
-  let y = pos.getY(i);
-  let z = pos.getZ(i);
-
-  // Scale to ellipsoid
-  x *= HR.x;
-  y *= HR.y;
-  z *= HR.z;
-
-  // Taper the bottom (jaw/chin) — below center
-  if (y < -15) {
-    const t = Math.max(0, Math.min(1, (y + HR.y) / (HR.y - 15)));
-    const jawFactor = 0.55 + 0.45 * t;
-    x *= jawFactor;
-    z *= jawFactor;
+  
+  // ---- Scene ----
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f1923);
+  scene.fog = new THREE.FogExp2(0x0f1923, 0.6);
+  
+  const camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 0.001, 50);
+  camera.position.set(0.1, 0.15, 0.55);
+  
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  container.appendChild(renderer.domElement);
+  
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.rotateSpeed = 0.7;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.6;
+  controls.maxDistance = 3;
+  controls.minDistance = 0.1;
+  
+  // ---- Lights ----
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight.position.set(2, 3, 4);
+  scene.add(dirLight);
+  const backLight = new THREE.DirectionalLight(0x4488cc, 0.3);
+  backLight.position.set(-2, -1, -3);
+  scene.add(backLight);
+  
+  // ---- State ----
+  let pointCloud = null;
+  let electrodeMeshes = [];
+  let labelSprites = [];
+  let showLabels = false;
+  let showCloud = true;
+  let initialCamPos, initialTarget;
+  
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+  let hoveredElectrode = null;
+  
+  // ---- Colors ----
+  const COL_ELECTRODE = new THREE.Color(0x00ABD9);
+  const COL_ELECTRODE_HOVER = new THREE.Color(0x00E5FF);
+  const COL_LANDMARK = new THREE.Color(0xEE7100);
+  const COL_LANDMARK_HOVER = new THREE.Color(0xFFAA44);
+  
+  // ---- Create electrode spheres + labels ----
+  function createElectrodes() {
+    const elecGeo = new THREE.SphereGeometry(1, 16, 12);
+    
+    Object.entries(ELECTRODES).forEach(([name, data]) => {
+      const isLandmark = data.type === 'landmark';
+      const baseColor = isLandmark ? COL_LANDMARK : COL_ELECTRODE;
+      const size = isLandmark ? 0.006 : 0.005;
+      
+      // Sphere
+      const mat = new THREE.MeshPhongMaterial({
+        color: baseColor,
+        emissive: baseColor.clone().multiplyScalar(0.25),
+        shininess: 60,
+        transparent: true,
+        opacity: 0.92,
+      });
+      const mesh = new THREE.Mesh(elecGeo, mat);
+      mesh.position.set(...data.position);
+      mesh.scale.setScalar(size);
+      mesh.userData = { name, type: data.type, baseColor: baseColor.clone() };
+      scene.add(mesh);
+      electrodeMeshes.push(mesh);
+      
+      // Glow ring
+      const ringGeo = new THREE.RingGeometry(1.3, 1.7, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: baseColor,
+        transparent: true,
+        opacity: 0.15,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.position.copy(mesh.position);
+      ring.scale.setScalar(size);
+      scene.add(ring);
+      
+      // Text label sprite
+      const label = makeTextSprite(name, isLandmark);
+      label.position.set(
+        data.position[0],
+        data.position[1] + size * 2.5,
+        data.position[2]
+      );
+      label.visible = false;
+      scene.add(label);
+      labelSprites.push(label);
+    });
   }
-
-  // Flatten back of head slightly
-  if (z > 40) {
-    z *= 0.93;
+  
+  function makeTextSprite(text, isLandmark) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const fontSize = 48;
+    canvas.width = 256;
+    canvas.height = 80;
+    
+    ctx.font = `bold ${fontSize}px "Noto Sans", sans-serif`;
+    
+    // Background pill
+    const textWidth = ctx.measureText(text).width;
+    const pillW = textWidth + 28;
+    const pillH = fontSize + 14;
+    const x = (canvas.width - pillW) / 2;
+    const y = (canvas.height - pillH) / 2;
+    
+    ctx.fillStyle = isLandmark ? 'rgba(238,113,0,0.88)' : 'rgba(0,62,107,0.88)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, pillW, pillH, 12);
+    ctx.fill();
+    
+    // Text
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    
+    const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.04, 0.012, 1);
+    return sprite;
   }
-
-  // Slight forehead bulge
-  if (y > 20 && y < 60 && z < -50) {
-    z -= 6 * Math.max(0, 1 - Math.abs(x) / 50);
+  
+  // ---- Load point cloud ----
+  function loadBinary(url) {
+    return fetch(url).then(r => {
+      if (!r.ok) throw new Error('Not found');
+      return r.arrayBuffer();
+    }).then(buf => {
+      const view = new DataView(buf);
+      const count = view.getUint32(0, true);
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      let off = 4;
+      for (let i = 0; i < count; i++) {
+        positions[i*3]     = view.getFloat32(off, true); off += 4;
+        positions[i*3 + 1] = view.getFloat32(off, true); off += 4;
+        positions[i*3 + 2] = view.getFloat32(off, true); off += 4;
+        colors[i*3]     = view.getUint8(off++) / 255;
+        colors[i*3 + 1] = view.getUint8(off++) / 255;
+        colors[i*3 + 2] = view.getUint8(off++) / 255;
+      }
+      return { count, positions, colors };
+    });
   }
-
-  pos.setXYZ(i, x, y, z);
-}
-headGeo.computeVertexNormals();
-
-const headMesh = new THREE.Mesh(headGeo, new THREE.MeshPhysicalMaterial({
-  color: 0xe8ddd0,
-  roughness: 0.6,
-  transparent: true,
-  opacity: 0.7,
-  clearcoat: 0.2,
-  side: THREE.DoubleSide,
-}));
-headMesh.position.set(HC.x, HC.y, HC.z);
-headGroup.add(headMesh);
-
-// ============================================================
-// NOSE — small bump to indicate face side
-// ============================================================
-const noseMesh = new THREE.Mesh(
-  new THREE.SphereGeometry(5, 12, 12),
-  new THREE.MeshPhysicalMaterial({
-    color: 0xe8ddd0, roughness: 0.6, transparent: true, opacity: 0.72,
-  })
-);
-noseMesh.scale.set(1, 0.8, 1.2);
-noseMesh.position.set(HC.x, HC.y - 30, HC.z - HR.z - 2);
-headGroup.add(noseMesh);
-
-// ============================================================
-// EARS — at LPA/RPA (ear canal level)
-// ============================================================
-function createEar(sideX) {
-  const earGeo = new THREE.SphereGeometry(1, 16, 12);
-  const ear = new THREE.Mesh(earGeo, new THREE.MeshPhysicalMaterial({
-    color: 0xddd0c4, roughness: 0.6, transparent: true, opacity: 0.72,
-  }));
-  ear.scale.set(7, 16, 5);
-  ear.position.set(sideX, LPA_3[1], LPA_3[2]);
-  ear.rotation.z = Math.sign(sideX) * 0.15;
-  headGroup.add(ear);
-}
-createEar(HC.x - HR.x - 4);  // left ear
-createEar(HC.x + HR.x + 4);  // right ear
-
-// ============================================================
-// FACE — simple eyes for orientation
-// ============================================================
-const faceMat = new THREE.MeshBasicMaterial({ color: 0x888888 });
-
-const leftEye = new THREE.Mesh(new THREE.SphereGeometry(3.5, 16, 16), faceMat);
-leftEye.scale.set(1, 1.3, 0.3);
-leftEye.position.set(HC.x - 16, HC.y - 5, HC.z - HR.z + 2);
-headGroup.add(leftEye);
-
-const rightEye = new THREE.Mesh(new THREE.SphereGeometry(3.5, 16, 16), faceMat);
-rightEye.scale.set(1, 1.3, 0.3);
-rightEye.position.set(HC.x + 16, HC.y - 5, HC.z - HR.z + 2);
-headGroup.add(rightEye);
-// ============================================================
-// ELECTRODES & LANDMARKS
-// ============================================================
-const spheres = [];
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-function addPoint(name, pipelinePos, color, radius, isLandmark) {
-  const p = toThree(pipelinePos);
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 24, 24),
-    new THREE.MeshPhysicalMaterial({
-      color, roughness: 0.25, metalness: 0.15,
-      clearcoat: 0.6, emissive: color, emissiveIntensity: 0.1,
+  
+  function loadJSON(url) {
+    return fetch(url).then(r => {
+      if (!r.ok) throw new Error('Not found');
+      return r.json();
+    }).then(d => ({
+      count: d.count,
+      positions: new Float32Array(d.positions),
+      colors: new Float32Array(d.colors),
+    }));
+  }
+  
+  function buildPointCloud(data) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    geo.computeBoundingSphere();
+    
+    const mat = new THREE.PointsMaterial({
+      size: 0.003,
+      vertexColors: true,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.7,
+    });
+    
+    pointCloud = new THREE.Points(geo, mat);
+    scene.add(pointCloud);
+    
+    return data.count;
+  }
+  
+  // ---- Init ----
+  createElectrodes();
+  
+  // Fit camera to electrodes
+  const elecPositions = Object.values(ELECTRODES).map(e => e.position);
+  const center = elecPositions.reduce((a, b) => [a[0]+b[0], a[1]+b[1], a[2]+b[2]], [0,0,0])
+    .map(v => v / elecPositions.length);
+  controls.target.set(center[0], center[1], center[2]);
+  
+  // Load point cloud
+  loadBinary('vggt_reconstruction.bin')
+    .catch(() => loadJSON('vggt_reconstruction.json'))
+    .then(data => {
+      const n = buildPointCloud(data);
+      infoBadge.textContent = `${n.toLocaleString()} points · 24 electrodes · 3 landmarks`;
+      
+      // Fit camera nicely
+      const sphere = pointCloud.geometry.boundingSphere;
+      camera.position.set(
+        sphere.center.x + sphere.radius * 0.5,
+        sphere.center.y + sphere.radius * 0.6,
+        sphere.center.z + sphere.radius * 2.0
+      );
+      controls.target.copy(sphere.center);
+      controls.update();
+      
+      initialCamPos = camera.position.clone();
+      initialTarget = controls.target.clone();
+      
+      loading.classList.add('hidden');
     })
-  );
-  mesh.position.set(p[0], p[1], p[2]);
-  mesh.userData.label = name;
-  headGroup.add(mesh);
-  spheres.push(mesh);
-
-  if (isLandmark) {
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(radius + 1.8, 0.8, 8, 32),
-      new THREE.MeshBasicMaterial({ color })
-    );
-    ring.position.copy(mesh.position);
-    ring.lookAt(HC.x, HC.y, HC.z);
-    headGroup.add(ring);
+    .catch(err => {
+      // Even without point cloud, show electrodes
+      console.warn('Point cloud not loaded, showing electrodes only:', err);
+      initialCamPos = camera.position.clone();
+      initialTarget = controls.target.clone();
+      loading.classList.add('hidden');
+      infoBadge.textContent = '24 electrodes · 3 landmarks';
+    });
+  
+  // ---- Hover / raycast ----
+  function onMouseMove(e) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(electrodeMeshes);
+    
+    if (intersects.length > 0) {
+      const mesh = intersects[0].object;
+      if (hoveredElectrode !== mesh) {
+        // Unhover previous
+        if (hoveredElectrode) {
+          const prev = hoveredElectrode.userData;
+          hoveredElectrode.material.color.copy(prev.baseColor);
+          hoveredElectrode.material.emissive.copy(prev.baseColor).multiplyScalar(0.25);
+          hoveredElectrode.scale.setScalar(prev.type === 'landmark' ? 0.006 : 0.005);
+        }
+        
+        // Hover new
+        hoveredElectrode = mesh;
+        const ud = mesh.userData;
+        const hoverColor = ud.type === 'landmark' ? COL_LANDMARK_HOVER : COL_ELECTRODE_HOVER;
+        mesh.material.color.copy(hoverColor);
+        mesh.material.emissive.copy(hoverColor).multiplyScalar(0.4);
+        mesh.scale.setScalar((ud.type === 'landmark' ? 0.006 : 0.005) * 1.4);
+        
+        // Tooltip
+        tooltip.textContent = ud.name;
+        tooltip.className = ud.type === 'landmark' ? 'landmark' : '';
+        tooltip.style.display = 'block';
+      }
+      
+      // Position tooltip
+      const pos = mesh.position.clone().project(camera);
+      const rect2 = renderer.domElement.getBoundingClientRect();
+      tooltip.style.left = ((pos.x + 1) / 2 * rect2.width) + 'px';
+      tooltip.style.top = ((-pos.y + 1) / 2 * rect2.height) + 'px';
+      
+      renderer.domElement.style.cursor = 'pointer';
+    } else {
+      if (hoveredElectrode) {
+        const prev = hoveredElectrode.userData;
+        hoveredElectrode.material.color.copy(prev.baseColor);
+        hoveredElectrode.material.emissive.copy(prev.baseColor).multiplyScalar(0.25);
+        hoveredElectrode.scale.setScalar(prev.type === 'landmark' ? 0.006 : 0.005);
+        hoveredElectrode = null;
+      }
+      tooltip.style.display = 'none';
+      renderer.domElement.style.cursor = 'grab';
+    }
   }
-}
-
-for (const [n, p] of Object.entries(electrodes)) addPoint(n, p, 0x4A90D9, 4.0, false);
-for (const [n, d] of Object.entries(landmarks))  addPoint(n, d.pos, d.color, 5.5, true);
-
-// ============================================================
-// CONTROLS
-// ============================================================
-let isDragging = false, prevM = { x: 0, y: 0 };
-let rotX = -0.1, rotY = Math.PI, zoom = 340;
-let autoRotate = true, autoTimer;
-
-function startDrag(x, y) {
-  isDragging = true; autoRotate = false;
-  clearTimeout(autoTimer);
-  prevM = { x, y };
-}
-function moveDrag(x, y) {
-  if (!isDragging) return;
-  rotY += (x - prevM.x) * 0.008;
-  rotX += (y - prevM.y) * 0.008;
-  rotX = Math.max(-1.4, Math.min(1.4, rotX));
-  prevM = { x, y };
-}
-function endDrag() {
-  isDragging = false;
-  autoTimer = setTimeout(() => { autoRotate = true; }, 3000);
-}
-
-const c = renderer.domElement;
-c.addEventListener('mousedown', e => startDrag(e.clientX, e.clientY));
-c.addEventListener('mousemove', e => {
-  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-  moveDrag(e.clientX, e.clientY);
-});
-c.addEventListener('mouseup', endDrag);
-c.addEventListener('mouseleave', () => { isDragging = false; });
-c.addEventListener('wheel', e => {
-  zoom = Math.max(180, Math.min(600, zoom + e.deltaY * 0.3));
-  e.preventDefault();
-}, { passive: false });
-c.addEventListener('touchstart', e => {
-  if (e.touches.length === 1) startDrag(e.touches[0].clientX, e.touches[0].clientY);
-});
-c.addEventListener('touchmove', e => {
-  if (e.touches.length === 1) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
-  e.preventDefault();
-}, { passive: false });
-c.addEventListener('touchend', endDrag);
-
-// ============================================================
-// RENDER
-// ============================================================
-const tooltip = document.getElementById('tooltip');
-const lookAt = new THREE.Vector3(HC.x, HC.y, HC.z);
-
-function animate() {
-  requestAnimationFrame(animate);
-  if (autoRotate) rotY += 0.004;
-
-  camera.position.x = lookAt.x + zoom * Math.sin(rotY) * Math.cos(rotX);
-  camera.position.y = lookAt.y + zoom * Math.sin(rotX);
-  camera.position.z = lookAt.z + zoom * Math.cos(rotY) * Math.cos(rotX);
-  camera.lookAt(lookAt);
-
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(spheres);
-  if (hits.length > 0 && !isDragging) {
-    const obj = hits[0].object;
-    tooltip.style.display = 'block';
-    const sp = obj.position.clone().project(camera);
-    tooltip.style.left = ((sp.x + 1) / 2 * window.innerWidth) + 'px';
-    tooltip.style.top  = ((-sp.y + 1) / 2 * window.innerHeight - 35) + 'px';
-    tooltip.textContent = obj.userData.label;
-    document.body.style.cursor = 'pointer';
-  } else {
-    tooltip.style.display = 'none';
-    document.body.style.cursor = isDragging ? 'grabbing' : 'grab';
+  renderer.domElement.addEventListener('mousemove', onMouseMove);
+  
+  // ---- Controls UI ----
+  document.getElementById('sl-points').addEventListener('input', function(e) {
+    if (pointCloud) pointCloud.material.size = parseFloat(e.target.value) * 0.0012;
+  });
+  
+  document.getElementById('sl-elec').addEventListener('input', function(e) {
+    const s = parseFloat(e.target.value);
+    electrodeMeshes.forEach(m => {
+      const base = m.userData.type === 'landmark' ? 0.006 : 0.005;
+      m.scale.setScalar(base * s);
+    });
+  });
+  
+  const btnLabels = document.getElementById('btn-labels');
+  btnLabels.addEventListener('click', function() {
+    showLabels = !showLabels;
+    btnLabels.classList.toggle('active', showLabels);
+    labelSprites.forEach(s => s.visible = showLabels);
+  });
+  
+  const btnCloud = document.getElementById('btn-cloud');
+  btnCloud.classList.add('active');
+  btnCloud.addEventListener('click', function() {
+    showCloud = !showCloud;
+    btnCloud.classList.toggle('active', showCloud);
+    if (pointCloud) pointCloud.visible = showCloud;
+  });
+  
+  document.getElementById('btn-reset').addEventListener('click', function() {
+    if (initialCamPos) camera.position.copy(initialCamPos);
+    if (initialTarget) controls.target.copy(initialTarget);
+    controls.autoRotate = true;
+    controls.update();
+  });
+  
+  controls.addEventListener('start', () => { controls.autoRotate = false; });
+  
+  // ---- Make label sprites face camera ----
+  // (Sprites auto-face camera in Three.js, so this is handled)
+  
+  // ---- Animate ----
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
   }
-  renderer.render(scene, camera);
-}
-animate();
-
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+  animate();
+  
+  // ---- Resize ----
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  });
+})();
 </script>
 </body>
 </html>

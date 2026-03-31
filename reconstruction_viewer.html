@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VGGT 3D Reconstruction</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  
+  body {
+    background: #0f1923;
+    overflow: hidden;
+    font-family: 'Noto Sans', -apple-system, sans-serif;
+  }
+  
+  #canvas-container {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+  }
+  
+  canvas { display: block; }
+  
+  /* Loading overlay */
+  #loading {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #0f1923;
+    z-index: 10;
+    transition: opacity 0.5s;
+  }
+  
+  #loading.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgba(0, 171, 217, 0.15);
+    border-top-color: #00ABD9;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 14px;
+  }
+  
+  @keyframes spin { to { transform: rotate(360deg); } }
+  
+  #loading span {
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    letter-spacing: 0.3px;
+  }
+  
+  /* Controls bar */
+  #controls {
+    position: absolute;
+    bottom: 0;
+    left: 0; right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: linear-gradient(transparent, rgba(15,25,35,0.85));
+    opacity: 0;
+    transition: opacity 0.3s;
+    z-index: 5;
+  }
+  
+  #canvas-container:hover #controls { opacity: 1; }
+  
+  #controls .hint {
+    color: rgba(255,255,255,0.4);
+    font-size: 11px;
+  }
+  
+  #controls .right-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: rgba(255,255,255,0.5);
+    font-size: 11px;
+  }
+  
+  .control-group input[type="range"] {
+    width: 60px;
+    height: 3px;
+    accent-color: #00ABD9;
+    cursor: pointer;
+  }
+  
+  #reset-btn {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.5);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  
+  #reset-btn:hover {
+    background: rgba(0, 171, 217, 0.15);
+    border-color: rgba(0, 171, 217, 0.3);
+    color: rgba(255,255,255,0.8);
+  }
+
+  /* Point count badge */
+  #info-badge {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    color: rgba(255,255,255,0.25);
+    font-size: 10px;
+    z-index: 5;
+    letter-spacing: 0.3px;
+  }
+</style>
+</head>
+<body>
+
+<div id="canvas-container">
+  <div id="loading">
+    <div class="spinner"></div>
+    <span>Loading 3D reconstruction...</span>
+  </div>
+  
+  <div id="info-badge"></div>
+  
+  <div id="controls">
+    <span class="hint">Drag to rotate · Scroll to zoom</span>
+    <div class="right-controls">
+      <div class="control-group">
+        <span>Size</span>
+        <input type="range" id="point-size" min="1" max="8" step="0.5" value="2.5">
+      </div>
+      <button id="reset-btn">Reset view</button>
+    </div>
+  </div>
+</div>
+
+<!-- Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+(function() {
+  const container = document.getElementById('canvas-container');
+  const loading = document.getElementById('loading');
+  const infoBadge = document.getElementById('info-badge');
+  
+  // ---- Scene setup ----
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f1923);
+  
+  // Subtle fog for depth
+  scene.fog = new THREE.FogExp2(0x0f1923, 0.8);
+  
+  const camera = new THREE.PerspectiveCamera(
+    55, container.clientWidth / container.clientHeight, 0.01, 50
+  );
+  camera.position.set(0, 0.15, 1.2);
+  
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  container.appendChild(renderer.domElement);
+  
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.rotateSpeed = 0.7;
+  controls.zoomSpeed = 0.8;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.8;
+  controls.maxDistance = 5;
+  controls.minDistance = 0.2;
+  
+  let pointCloud = null;
+  let initialCameraPos = camera.position.clone();
+  let initialTarget = new THREE.Vector3();
+  
+  // ---- Load binary point cloud ----
+  // Try binary first, fall back to JSON
+  const BASE_PATH = '';  // Same directory as this HTML file
+  
+  function loadBinary(url) {
+    return fetch(url)
+      .then(r => {
+        if (!r.ok) throw new Error('Binary not found');
+        return r.arrayBuffer();
+      })
+      .then(buffer => {
+        const view = new DataView(buffer);
+        const count = view.getUint32(0, true);
+        
+        const positions = new Float32Array(count * 3);
+        const colors = new Float32Array(count * 3);
+        
+        let offset = 4;
+        for (let i = 0; i < count; i++) {
+          positions[i*3]     = view.getFloat32(offset, true); offset += 4;
+          positions[i*3 + 1] = view.getFloat32(offset, true); offset += 4;
+          positions[i*3 + 2] = view.getFloat32(offset, true); offset += 4;
+          colors[i*3]     = view.getUint8(offset++) / 255;
+          colors[i*3 + 1] = view.getUint8(offset++) / 255;
+          colors[i*3 + 2] = view.getUint8(offset++) / 255;
+        }
+        
+        return { count, positions, colors };
+      });
+  }
+  
+  function loadJSON(url) {
+    return fetch(url)
+      .then(r => {
+        if (!r.ok) throw new Error('JSON not found');
+        return r.json();
+      })
+      .then(data => ({
+        count: data.count,
+        positions: new Float32Array(data.positions),
+        colors: new Float32Array(data.colors),
+      }));
+  }
+  
+  function buildPointCloud(data) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    geometry.computeBoundingSphere();
+    
+    const material = new THREE.PointsMaterial({
+      size: 0.003,
+      vertexColors: true,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.85,
+    });
+    
+    pointCloud = new THREE.Points(geometry, material);
+    scene.add(pointCloud);
+    
+    // Fit camera
+    const sphere = geometry.boundingSphere;
+    const dist = sphere.radius * 2.2;
+    camera.position.set(
+      sphere.center.x + dist * 0.3,
+      sphere.center.y + sphere.radius * 0.4,
+      sphere.center.z + dist
+    );
+    controls.target.copy(sphere.center);
+    controls.update();
+    
+    initialCameraPos = camera.position.clone();
+    initialTarget = controls.target.clone();
+    
+    // UI updates
+    loading.classList.add('hidden');
+    infoBadge.textContent = `${data.count.toLocaleString()} points · VGGT reconstruction`;
+    
+    console.log(`Loaded ${data.count.toLocaleString()} points`);
+  }
+  
+  // Try binary first, fallback to JSON
+  loadBinary(BASE_PATH + 'vggt_reconstruction.bin')
+    .catch(() => {
+      console.log('Binary not found, trying JSON...');
+      return loadJSON(BASE_PATH + 'vggt_reconstruction.json');
+    })
+    .then(buildPointCloud)
+    .catch(err => {
+      loading.querySelector('span').textContent = 'Failed to load point cloud';
+      loading.querySelector('span').style.color = '#e74c3c';
+      loading.querySelector('.spinner').style.display = 'none';
+      console.error(err);
+    });
+  
+  // ---- Controls ----
+  document.getElementById('point-size').addEventListener('input', function(e) {
+    if (pointCloud) {
+      pointCloud.material.size = parseFloat(e.target.value) * 0.0012;
+    }
+  });
+  
+  document.getElementById('reset-btn').addEventListener('click', function() {
+    camera.position.copy(initialCameraPos);
+    controls.target.copy(initialTarget);
+    controls.autoRotate = true;
+    controls.update();
+  });
+  
+  // Stop auto-rotate on user interaction
+  controls.addEventListener('start', () => { controls.autoRotate = false; });
+  
+  // ---- Animation loop ----
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+  
+  // ---- Resize ----
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  });
+})();
+</script>
+
+</body>
+</html>
