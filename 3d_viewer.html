@@ -96,7 +96,7 @@ fetch('vggt_head.bin')
     sc.add(pc);
     inf.textContent=n.toLocaleString()+' points · 24 electrodes · 3 landmarks';
     const sp=geo.boundingSphere;
-    cam.position.set(sp.center.x+sp.radius*.3,sp.center.y+sp.radius*.4,sp.center.z+sp.radius*1.8);
+    cam.position.set(sp.center.x,sp.center.y+sp.radius*.3,sp.center.z-sp.radius*2.5);
     oc.target.copy(sp.center);oc.update();
     iCP=cam.position.clone();iCT=oc.target.clone();
     ld.classList.add('h');

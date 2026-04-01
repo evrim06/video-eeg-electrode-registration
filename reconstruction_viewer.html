@@ -72,7 +72,7 @@ fetch('vggt_recon.bin')
     pc=new THREE.Points(geo,new THREE.PointsMaterial({size:0.0025,vertexColors:true,sizeAttenuation:true,transparent:true,opacity:0.9}));
     scene.add(pc);
     const sp=geo.boundingSphere;
-    camera.position.set(sp.center.x+sp.radius*0.3,sp.center.y+sp.radius*0.4,sp.center.z+sp.radius*2);
+    camera.position.set(sp.center.x,sp.center.y+sp.radius*0.3,sp.center.z-sp.radius*2.5);
     ctrl.target.copy(sp.center);ctrl.update();
     iCP=camera.position.clone();iCT=ctrl.target.clone();
     document.getElementById('loading').classList.add('hidden');
